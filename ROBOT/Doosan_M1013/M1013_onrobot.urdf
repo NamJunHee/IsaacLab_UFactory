@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="M1013_origin">
+  <joint name="J1_joint" type="revolute">
+    <origin xyz="0. 0. 0." rpy="0. 0. 0."/>
+    <parent link="robot_base"/>
+    <child link="J1"/>
+    <axis xyz="0. 0. 1."/>
+    <limit lower="-3.1415927" upper="3.1415927" effort="1000" velocity="1.0"/>
+  </joint>
+  <joint name="J2_joint" type="revolute">
+    <origin xyz="0. -0.1023542 0.0975 " rpy="0. 0. 0."/>
+    <parent link="J1"/>
+    <child link="J2"/>
+    <axis xyz="0. 1. 0."/>
+    <limit lower="-3.1415927" upper="3.1415927" effort="1000" velocity="1.0"/>
+  </joint>
+  <joint name="J3_joint" type="revolute">
+    <origin xyz="0. -0.0136887 0.6193591" rpy="0. 0. 0."/>
+    <parent link="J2"/>
+    <child link="J3"/>
+    <axis xyz="0. 1. 0."/>
+    <limit lower="-3.1415927" upper="3.1415927" effort="1000" velocity="1.0"/>
+  </joint>
+  <joint name="J4_joint" type="revolute">
+    <origin xyz="0. 0.0809669 0.0838172" rpy="0. 0. 0."/>
+    <parent link="J3"/>
+    <child link="J4"/>
+    <axis xyz="0. 0. 1."/>
+    <limit lower="-3.1415927" upper="3.1415927" effort="1000" velocity="1.0"/>
+  </joint>
+  <joint name="J5_joint" type="revolute">
+    <origin xyz="0. -0.0789287 0.4752716" rpy="0. 0. 0."/>
+    <parent link="J4"/>
+    <child link="J5"/>
+    <axis xyz="0. 1. 0."/>
+    <limit lower="-3.1415927" upper="3.1415927" effort="1000" velocity="1.0"/>
+  </joint>
+  <joint name="J6_joint" type="revolute">
+    <origin xyz="0. 0.0789269 0.0607461" rpy="0. 0. 0."/>
+    <parent link="J5"/>
+    <child link="J6"/>
+    <axis xyz="0. 0. 1."/>
+    <limit lower="-3.1415927" upper="3.1415927" effort="1000" velocity="1.0"/>
+  </joint>
+  <joint name="robot_base_fix" type="fixed">
+    <origin xyz="0. 0. 0.056117" rpy="0. 0. 0."/>
+    <parent link="Doosan_M1013"/>
+    <child link="robot_base"/>
+  </joint>
+  <link name="Doosan_M1013"/>
+  <link name="J1">
+    <visual>
+      <origin xyz="0. 0. 0." rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J1_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0. 0. 0." rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J1_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="J2">
+    <visual>
+      <origin xyz="0. 0.10235 -0.097498" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J2_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0. 0.10235 -0.097498" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J2_1.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0. 0.10235 -0.097498" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J2_2.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0. 0.10235 -0.097498" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J2_3.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0. 0.10235 -0.097498" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J2_4.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0. 0.10235 -0.097498" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J2_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0. 0.10235 -0.097498" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J2_1.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0. 0.10235 -0.097498" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J2_2.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0. 0.10235 -0.097498" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J2_3.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0. 0.10235 -0.097498" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J2_4.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="J3">
+    <visual>
+      <origin xyz="0. 0.11604 -0.71686" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J3_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0. 0.11604 -0.71686" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J3_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="J4">
+    <visual>
+      <origin xyz="0. 0.03507 -0.80068" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J4_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz="0. 0.03507 -0.80068" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J4_1.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0. 0.03507 -0.80068" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J4_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin xyz="0. 0.03507 -0.80068" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J4_1.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="J5">
+    <visual>
+      <origin xyz="0. 0.114 -1.2759516" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J5_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0. 0.114 -1.2759516" rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J5_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="J6">
+    <visual>
+      <origin xyz="0. 0.03507 -1.3367 " rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J6_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0. 0.03507 -1.3367 " rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/J6_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="robot_base">
+    <visual>
+      <origin xyz="0. 0. 0." rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/robot_base_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0. 0. 0." rpy="0. 0. 0."/>
+      <geometry>
+        <mesh filename="meshes/robot_base_0.obj" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>
