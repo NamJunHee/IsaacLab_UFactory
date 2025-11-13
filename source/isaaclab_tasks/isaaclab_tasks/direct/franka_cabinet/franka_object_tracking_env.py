@@ -69,26 +69,26 @@ class ObjectMoveType(Enum):
     CIRCLE = "circle"
     LINEAR = "linear"
     STOP = "stop"
-object_move = ObjectMoveType.STATIC
-# object_move = ObjectMoveType.LINEAR
+# object_move = ObjectMoveType.STATIC
+object_move = ObjectMoveType.LINEAR
 # object_move = ObjectMoveType.STOP
 
 class CameraType(Enum):
     Sim = "sim"
     Azure = "azure"
-camera_type = CameraType.Azure
+camera_type = CameraType.Sim
 
 training_mode = False
 
 foundationpose_mode = False
-yolo_mode = True
+yolo_mode = False
 
 camera_enable = False
 image_publish = False
 
 robot_action = False
 robot_init_pose = False
-robot_fix = True
+robot_fix = False
 
 init_reward = True
 UFactory_set_mode = True
@@ -97,7 +97,7 @@ add_episode_length = 200
 # add_episode_length = 600
 # add_episode_length = -400 # 초기 학습 시 episode 길이
 
-vel_ratio = 0.10
+vel_ratio = 1.0
 obj_speed = 0.001
 
 rand_pos_range = {
@@ -790,8 +790,9 @@ class FrankaObjectTrackingEnvCfg(DirectRLEnvCfg):
     
     # action_scale = 7.5
     # dof_velocity_scale = 0.1
-    action_scale = 2.0
-    dof_velocity_scale = 0.05
+
+    action_scale = 1.0
+    dof_velocity_scale = 0.07
 
     # reward scales
     # dist_reward_scale = 1.5
@@ -829,13 +830,13 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         
         # 학습 초기 (좁은 범위)
         self.rand_pos_range = {
-            "x" : ( 0.50,  0.50),
-            "y" : ( 0.15,  0.15),
-            "z" : (  0.1, 0.1),
+            # "x" : ( 0.50,  0.50),
+            # "y" : ( 0.15,  0.15),
+            # "z" : (  0.1, 0.1),
                 
-            # "x" : (  0.30, 0.80),
-            # "y" : ( -0.35, 0.35),
-            # "z" : (  0.20, 0.70),
+            "x" : (  0.30, 0.80),
+            "y" : ( -0.35, 0.35),
+            "z" : (  0.20, 0.70),
             
             # "x" : (  0.50, 0.70),
             # "y" : ( -0.35, 0.35),
@@ -1130,51 +1131,38 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             x_max, x_min, y_max, y_min, z_max, z_min = 750, 50, 600, -600, 1000, 50
             self.arm.set_reduced_tcp_boundary([x_max, x_min, y_max, y_min, z_max, z_min])
             self.arm.set_fense_mode(True)
-
-        # ==================================================================
-        # [ 💥 1. "좌표 설정" (수동 측정 캘리브레이션 값) 💥 ]
-        # (수정 완료: 2025-11-05)
-        # ==================================================================
-
-        # --- 1. 손으로 측정한 "ROS 기준" 원본 결과 입력 ---
-        # T_gripper_to_cam (그리퍼 중심 -> 카메라 중심 벡터)
-        # "그리퍼 좌표계" 기준으로 측정.
-        # (예: 그리퍼 X축(아래)으로 -70mm = 위로 70mm)
+        
+        # --- 1. "hand_eye_calibration.py" 스크립트 실행 결과 입력 ---
         t_cam_to_gripper_mm = torch.tensor(
-            [ -70.0, -32.0, 130.0 ],  # ⬅️ "손 측정" X, Y, Z 값 (mm 단위)
+            [70.03869874385214, 32.93603944336598, -129.5520585552788],
             device=self.device, dtype=torch.float32
         )
         
         # --- 2. 회전(Rotation) 값 ---
-        # R_cam_to_gripper (카메라 -> 그리퍼 회전)
-        # 💥💥💥 사용자가 테스트로 찾은 "X축 -90도 회전" 값 💥💥💥
         R_cam_to_gripper_quat_ROS = torch.tensor(
-            [1,0,0,0],
-            # [ 0.7071068, -0.7071068, 0.0, 0.0 ], # ⬅️ (w, x, y, z)
-            # [0.5, -0.5, 0.5, 0.5],
+            [-0.08403050810066812, 0.7031366469474544, 0.038105476236599455, 0.7050430498264744],
             device=self.device, dtype=torch.float32
         )
-        
-        # --- 3. '역변환' (T_gripper_to_cam) 계산 ---
-        # 이 값들이 T_world_gripper와 결합되어 T_world_camera를 계산하는 데 사용됩니다.
 
-        # 3a. 회전 (R_gripper_to_cam)
-        # inv(R_cam_to_gripper) = inv(X -90) = X +90
-        self.cam_local_rot_quat = R_cam_to_gripper_quat_ROS.clone()
-        self.cam_local_rot_quat[1:] *= -1.0 # 켤레 (Inverse rotation)
-                                           # 결과: [0.707, 0.707, 0, 0] (X축 +90도)
+        # --- 3. '역변환' (T_gripper_to_cam) 계산 ---
+        # T_cam_to_gripper (캘리브레이션 결과)
+        R_cam_to_gripper_ROS = R_cam_to_gripper_quat_ROS.clone()
+        t_cam_to_gripper_ROS = (t_cam_to_gripper_mm / 1000.0).unsqueeze(0) # [1, 3]
+
+        # T_gripper_to_cam (T_cam_to_gripper의 역변환)
+        # R_gripper_to_cam = R_cam_to_gripper^-1
+        self.R_gripper_to_cam = R_cam_to_gripper_ROS.clone().unsqueeze(0) # [1, 4]
+        self.R_gripper_to_cam[:, 1:] *= -1.0 # 켤레 (Inverse rotation)
         
-        # 3b. 위치 (P_gripper_to_cam)
-        # 🚨 [수정됨] 🚨
-        # 측정한 값(t_cam_to_gripper_mm)이 "그리퍼 좌표계" 기준이므로,
-        # 복잡한 역변환 없이 m 단위로 변환하여 "그대로" 사용합니다.
-        self.cam_local_pos = t_cam_to_gripper_mm / 1000.0
+        # t_gripper_to_cam = - (R_gripper_to_cam @ t_cam_to_gripper)
+        R_gripper_to_cam_matrix = kornia.geometry.conversions.quaternion_to_rotation_matrix(self.R_gripper_to_cam) # [1, 3, 3]
         
-        # # (디버깅) 계산된 값 확인
-        # print("="*50)
-        # print(f"[TF Setup] T_gripper_to_cam (Rotation): {self.cam_local_rot_quat}")
-        # print(f"[TF Setup] T_gripper_to_cam (Position): {self.cam_local_pos}")
-        # print("="*50)
+        # [1, 3, 1] = - ( [1, 3, 3] @ [1, 3, 1] )
+        t_gripper_to_cam_ROS = -torch.bmm(R_gripper_to_cam_matrix, t_cam_to_gripper_ROS.unsqueeze(-1))
+        
+        # 최종적으로 사용할 역변환 값을 멤버 변수에 저장
+        self.R_gripper_to_cam = self.R_gripper_to_cam.squeeze(0) # [4]
+        self.t_gripper_to_cam = t_gripper_to_cam_ROS.squeeze(-1).squeeze(0) # [3]
 
     def publish_camera_data(self):
         env_id = 0
@@ -1485,6 +1473,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
             if robot_action and robot_init_pose:
                 self._robot.set_joint_position_target(target_pos)
+
                 if UFactory_set_mode:
                     # print("target_pos :", target_pos)
                     xarm_actions = self._robot.data.joint_pos[:, :6]
@@ -1504,7 +1493,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                     rad_speed = math.radians(ang_speed)
                     rad_mvacc = math.radians(angmvacc)
 
-                    self.arm.set_servo_angle(angle=angle_cmd, speed=rad_speed, wait=False, is_radian=True, mvacc = rad_mvacc)
+                    # self.arm.set_servo_angle(angle=angle_cmd, speed=rad_speed, wait=False, is_radian=True, mvacc = rad_mvacc)
 
                     # print("self.box_grasp_pos : ", self.box_grasp_pos)
 
@@ -1857,11 +1846,18 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
         # --- 2. '절대 월드(ROS)' 기준 '카메라(ROS)'의 포즈 계산 (T_world_cam_ROS) ---
         # (이 부분은 로봇이 움직이면 항상 새로 계산되어야 합니다)
+        # cam_rot_world_ros, cam_pos_world_ros = tf_combine(
+        #     gripper_rot_world, 
+        #     gripper_pos_world,
+        #     self.cam_local_rot_quat.repeat(self.num_envs, 1), # ⬅️ __init__에서 설정한 값
+        #     self.cam_local_pos.repeat(self.num_envs, 1)       # ⬅️ __init__에서 설정한 값
+        # )
+        
         cam_rot_world_ros, cam_pos_world_ros = tf_combine(
             gripper_rot_world, 
             gripper_pos_world,
-            self.cam_local_rot_quat.repeat(self.num_envs, 1), # ⬅️ __init__에서 설정한 값
-            self.cam_local_pos.repeat(self.num_envs, 1)       # ⬅️ __init__에서 설정한 값
+            self.R_gripper_to_cam.repeat(self.num_envs, 1), # ⬅️ 2단계에서 만든 변수
+            self.t_gripper_to_cam.repeat(self.num_envs, 1)  # ⬅️ 2단계에서 만든 변수
         )
 
         # --- 3. YOLO 구독 및 '절대 월드 좌표'로 변환 (P_world) ---
@@ -1879,12 +1875,14 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
                 # (CV -> ROS 변환)
                 yolo_pos_cam_ros = torch.zeros_like(yolo_pos_cam_cv)
-                # yolo_pos_cam_ros[:, 0] =  yolo_pos_cam_cv[:, 2]
-                # yolo_pos_cam_ros[:, 1] = -yolo_pos_cam_cv[:, 0]
-                # yolo_pos_cam_ros[:, 2] = -yolo_pos_cam_cv[:, 1]
-                yolo_pos_cam_ros[:, 0] = -yolo_pos_cam_cv[:, 1]
-                yolo_pos_cam_ros[:, 1] = yolo_pos_cam_cv[:, 0]
-                yolo_pos_cam_ros[:, 2] = yolo_pos_cam_cv[:, 2]
+
+                yolo_pos_cam_ros[:, 0] =  yolo_pos_cam_cv[:, 2]
+                yolo_pos_cam_ros[:, 1] = -yolo_pos_cam_cv[:, 0]
+                yolo_pos_cam_ros[:, 2] = -yolo_pos_cam_cv[:, 1]
+
+                # yolo_pos_cam_ros[:, 0] = -yolo_pos_cam_cv[:, 1]
+                # yolo_pos_cam_ros[:, 1] = yolo_pos_cam_cv[:, 0]
+                # yolo_pos_cam_ros[:, 2] = yolo_pos_cam_cv[:, 2]
 
                 # (월드 좌표 계산)
                 object_pos_world_abs = tf_vector(cam_rot_world_ros, yolo_pos_cam_ros) + cam_pos_world_ros
