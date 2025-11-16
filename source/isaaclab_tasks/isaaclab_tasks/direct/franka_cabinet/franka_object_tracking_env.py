@@ -1203,6 +1203,12 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         # [추가] 로봇 "정지" 명령을 위한 현재 조인트 위치 버퍼
         self.current_joint_pos_buffer = self._robot.data.joint_pos.clone()
 
+        # [추가] YOLO 감지 실패 시 충돌(AttributeError) 방지를 위한 초기화
+        # (이 값은 아래 로직에 의해 로봇 이동에 사용되지 않습니다)
+        self.last_known_world_pos = torch.zeros((self.num_envs, 3), 
+                                                device=self.device, 
+                                                dtype=torch.float32)
+
     def publish_camera_data(self):
         env_id = 0
         
@@ -1466,27 +1472,16 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         potential_targets_clamped = torch.clamp(potential_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
         if training_mode:
-            # [수정] 훈련 모드일 때는 가시성과 관계없이 항상 정책의 행동을 적용
             self.robot_dof_targets[:] = potential_targets_clamped
-        
-        else:
-            # [수정] 테스트 모드일 때만 가시성에 따른 조건부 정지/행동 로직 적용
-            
-            # 2. "정지" 목표 위치 (이전 스텝에서 저장해둔 현재 조인트 위치)
-            # self.current_joint_pos_buffer는 _get_observations에서 매 스텝 업데이트됩니다.
+        else:            
             hold_targets = self.current_joint_pos_buffer
-
-            # 3. 가시성 마스크를 사용하여 목표 위치 선택
-            # self.is_object_visible_mask는 _get_rewards에서 매 스텝 업데이트됩니다.
             visible_mask_expanded = self.is_object_visible_mask.unsqueeze(-1) 
             
-            # self.robot_dof_targets를 최종 목표로 업데이트
             self.robot_dof_targets[:] = torch.where(
                 visible_mask_expanded, 
                 potential_targets_clamped,  # 시야 O: 행동 적용
                 hold_targets                # 시야 X: 현재 위치 고수 (정지)
             )
-        # [수정 끝] -----------------------------------------------------------
         
         self.cfg.current_time = self.cfg.current_time + self.dt
         current_time = torch.tensor(self.cfg.current_time, device=self.device, dtype=torch.float32)
@@ -2121,8 +2116,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         super()._reset_idx(env_ids)
 
     def _get_observations(self) -> dict:
-
-        # [추가] 현재 조인트 위치 버퍼 업데이트
+        global robot_action
         self.current_joint_pos_buffer[:] = self._robot.data.joint_pos
         
         dof_pos_scaled = (
@@ -2132,10 +2126,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             - 1.0
         )
         
-        global robot_action
-
         if yolo_mode: 
-            # 1. [REAL] 실제 로봇 그리퍼 '링크' 위치/회전 가져오기
             hand_pos_real, hand_rot_real = self.get_real_hand_pose() # (XArm API)
             if hand_pos_real is None:
                 print("⚠️ [오류] 실제 로봇 포즈를 읽을 수 없습니다. (fallback to sim)")
@@ -2146,22 +2137,12 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 gripper_link_pos_w = hand_pos_real.repeat(self.num_envs, 1)
                 gripper_link_rot_w = hand_rot_real.repeat(self.num_envs, 1)
             
-            # 2. [REAL] 실제 로봇 '그리퍼 파지점' 계산 (로컬 오프셋 적용)
-            # (self.robot_grasp_pos의 실제 로봇 버전)
             _, real_gripper_grasp_pos = tf_combine(
                 gripper_link_rot_w, 
                 gripper_link_pos_w,
                 self.robot_local_grasp_rot, 
                 self.robot_local_grasp_pos
             )
-
-            # # 3. [REAL] 실제 카메라 좌표계 계산 (YOLO 좌표 변환용)
-            # cam_rot_world_ros, cam_pos_world_ros = tf_combine(
-            #     gripper_link_rot_w, 
-            #     gripper_link_pos_w,
-            #     self.R_gripper_to_cam.repeat(self.num_envs, 1), 
-            #     self.t_gripper_to_cam.repeat(self.num_envs, 1)
-            # )
 
             cam_rot_world_ros, cam_pos_world_ros = tf_combine(
                 gripper_link_rot_w,                                   # ⬅️ 수정
@@ -2170,11 +2151,12 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 self.t_cam_to_gripper_local.repeat(self.num_envs, 1)  # ⬅️ 수정
             )
 
-            # 4. [REAL] YOLO로부터 실제 물체 위치 가져오기
             rclpy.spin_once(self.yolo_node, timeout_sec=0.01)
             yolo_pos_raw = self.subscribe_yolo() 
 
-            if (yolo_pos_raw is not None):                
+            if (yolo_pos_raw is not None):
+                self.is_object_visible_mask[:] = True
+                
                 yolo_pos_cam_cv = yolo_pos_raw.repeat(self.num_envs, 1)
                 yolo_pos_cam_ros = torch.zeros_like(yolo_pos_cam_cv)
 
@@ -2182,7 +2164,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 yolo_pos_cam_ros[:, 1] = -yolo_pos_cam_cv[:, 0]
                 yolo_pos_cam_ros[:, 2] = -yolo_pos_cam_cv[:, 1]
 
-                # YOLO 좌표를 월드 좌표로 변환
                 object_pos_world_abs = tf_vector(cam_rot_world_ros, yolo_pos_cam_ros) + cam_pos_world_ros
                 
                 print("*" * 50)
@@ -2191,33 +2172,20 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
                 self.last_known_world_pos = object_pos_world_abs
             else:
+                self.is_object_visible_mask[:] = False
                 robot_action = False
-                # print(f"\rYOLO (World Td, STALE): {self.last_known_world_pos[0]}   ", end="")
-                # (YOLO가 감지를 놓치면 마지막으로 성공한 위치를 계속 사용)
 
-            # 5. [REAL] 정책에 입력될 실제 관찰 값 계산
-            # (self.box_grasp_pos의 실제 로봇 버전)
-            # 참고: 물체의 로컬 파지점이 0,0,0으로 가정됨 (__init__의 box_local_pose)
             real_object_grasp_pos = self.last_known_world_pos
-            
-            # 핵심: 실제 물체 위치 - 실제 그리퍼 위치
             to_target = real_object_grasp_pos - real_gripper_grasp_pos
+
             object_z_pos = real_object_grasp_pos[:, 2].unsqueeze(-1)
-            
-            # Sim-to-Real 한계: YOLO는 속도를 제공하지 않으므로 0으로 설정
             object_z_vel = torch.zeros_like(object_z_pos)
 
         else: # 시뮬레이션 모드 (yolo_mode = False)
-            # [SIM] 기존과 동일하게 시뮬레이션 내부의 ground-truth 값 사용
-            # (이 값들은 _get_rewards -> _compute_intermediate_values에서 이미 계산됨)
             to_target = self.box_grasp_pos - self.robot_grasp_pos
             object_z_pos = self._box.data.body_link_pos_w[:, 0, 2].unsqueeze(-1)
             object_z_vel = self._box.data.body_link_vel_w[:, 0, 2].unsqueeze(-1)
 
-        
-        # (기존의 final_target_relative 및 to_target 계산 로직 삭제)
-
-        # 6. 최종 관찰(Observation) 생성
         obs = torch.cat(
             (
                 dof_pos_scaled,
