@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import torch
+torch.set_printoptions(precision=4, sci_mode=False)
 
 from isaacsim.core.utils.stage import get_current_stage
 from isaacsim.core.utils.torch.transformations import tf_combine, tf_inverse, tf_vector
@@ -69,8 +70,8 @@ class ObjectMoveType(Enum):
     CIRCLE = "circle"
     LINEAR = "linear"
     STOP = "stop"
-# object_move = ObjectMoveType.STATIC
-object_move = ObjectMoveType.LINEAR
+object_move = ObjectMoveType.STATIC
+# object_move = ObjectMoveType.LINEAR
 # object_move = ObjectMoveType.STOP
 
 class CameraType(Enum):
@@ -81,14 +82,14 @@ camera_type = CameraType.Sim
 training_mode = False
 
 foundationpose_mode = False
-yolo_mode = False
+yolo_mode = True
 
 camera_enable = True
 image_publish = True
 
 robot_action = False
 robot_init_pose = False
-robot_fix = False
+robot_fix = True
 
 init_reward = True
 UFactory_set_mode = True
@@ -911,7 +912,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             (self.num_envs,), 0.5, device=self.device, dtype=torch.float32
         )
         # ------------------------------------------------------------------------
-        
 
         if robot_type == RobotType.FRANKA:
             self.joint_names = [
@@ -1063,9 +1063,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             (self.num_envs, 1)
         )
         
-        # self.cube_z_axis = torch.tensor([0,0,1], device=self.device, dtype=torch.float32).repeat(
-        #     (self.num_envs,1)
-        # )
         self.box_z_axis = torch.tensor([0,0,1], device=self.device, dtype=torch.float32).repeat(
             (self.num_envs,1)
         )
@@ -1186,35 +1183,20 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         
         # --- 1. "hand_eye_calibration.py" 스크립트 실행 결과 입력 ---
         t_cam_to_gripper_mm = torch.tensor(
-            [70.03869874385214, 32.93603944336598, -129.5520585552788],
+            [70, 35, -133],
             device=self.device, dtype=torch.float32
         )
         
         # --- 2. 회전(Rotation) 값 ---
         R_cam_to_gripper_quat_ROS = torch.tensor(
             [-0.08403050810066812, 0.7031366469474544, 0.038105476236599455, 0.7050430498264744],
+            # [0.0, 0.7071, 0.0, 0.7071],
+            # [0.0, 0.0, 0.0, 1.0],
             device=self.device, dtype=torch.float32
         )
 
-        # --- 3. '역변환' (T_gripper_to_cam) 계산 ---
-        # T_cam_to_gripper (캘리브레이션 결과)
-        R_cam_to_gripper_ROS = R_cam_to_gripper_quat_ROS.clone()
-        t_cam_to_gripper_ROS = (t_cam_to_gripper_mm / 1000.0).unsqueeze(0) # [1, 3]
-
-        # T_gripper_to_cam (T_cam_to_gripper의 역변환)
-        # R_gripper_to_cam = R_cam_to_gripper^-1
-        self.R_gripper_to_cam = R_cam_to_gripper_ROS.clone().unsqueeze(0) # [1, 4]
-        self.R_gripper_to_cam[:, 1:] *= -1.0 # 켤레 (Inverse rotation)
-        
-        # t_gripper_to_cam = - (R_gripper_to_cam @ t_cam_to_gripper)
-        R_gripper_to_cam_matrix = kornia.geometry.conversions.quaternion_to_rotation_matrix(self.R_gripper_to_cam) # [1, 3, 3]
-        
-        # [1, 3, 1] = - ( [1, 3, 3] @ [1, 3, 1] )
-        t_gripper_to_cam_ROS = -torch.bmm(R_gripper_to_cam_matrix, t_cam_to_gripper_ROS.unsqueeze(-1))
-        
-        # 최종적으로 사용할 역변환 값을 멤버 변수에 저장
-        self.R_gripper_to_cam = self.R_gripper_to_cam.squeeze(0) # [4]
-        self.t_gripper_to_cam = t_gripper_to_cam_ROS.squeeze(-1).squeeze(0) # [3]
+        self.R_cam_to_gripper_local = R_cam_to_gripper_quat_ROS.clone()
+        self.t_cam_to_gripper_local = (t_cam_to_gripper_mm / 1000.0)
 
         # [추가] 물체 가시성(visibility) 마스크. False(보이지 않음)로 초기화
         self.is_object_visible_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -1349,31 +1331,72 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         
         return hand_pos_real, hand_rot_real
     
-    def compute_camera_world_pose(self, hand_pos, hand_rot):
-        if robot_type == RobotType.FRANKA:
-            cam_offset_pos = torch.tensor([0.0, 0.0, 0.05], device=hand_pos.device).repeat(self.num_envs, 1)
-            q_cam_in_hand = torch.tensor([0.0, 0.707, 0.707, 0.0], device=hand_pos.device).repeat(self.num_envs, 1)
-        elif robot_type == RobotType.UF:
-            if camera_type == CameraType.Azure:
-                cam_offset_pos = torch.tensor([-0.0, -0.075, 0.075], device=hand_pos.device).repeat(self.num_envs, 1)
-                q_cam_in_hand = torch.tensor([0.0, -0.7071, 0.0, 0.7071], device=hand_pos.device).repeat(self.num_envs, 1)
-            if camera_type == CameraType.Sim:
-                cam_offset_pos = torch.tensor([0.0, 0.0, 0.1], device=hand_pos.device).repeat(self.num_envs, 1)
-                q_cam_in_hand = torch.tensor([0.0, -0.7071, 0.0, 0.7071], device=hand_pos.device).repeat(self.num_envs, 1)
-        elif robot_type == RobotType.DOOSAN:
-            cam_offset_pos = torch.tensor([0.0, 0.0, 0.0], device=hand_pos.device).repeat(self.num_envs, 1)
-            # q_cam_in_hand = torch.tensor([-0.5, 0.5, -0.5, -0.5], device=hand_pos.device).repeat(self.num_envs, 1)
-            q_cam_in_hand = torch.tensor([0.0, -0.707, 0.707, 0.0], device=hand_pos.device).repeat(self.num_envs, 1)
+    # def compute_camera_world_pose(self, hand_pos, hand_rot):
+    
+    #     if robot_type == RobotType.FRANKA:
+    #         cam_offset_pos = torch.tensor([0.0, 0.0, 0.05], device=hand_pos.device).repeat(self.num_envs, 1)
+    #         q_cam_in_hand = torch.tensor([0.0, 0.707, 0.707, 0.0], device=hand_pos.device).repeat(self.num_envs, 1)
+    #     elif robot_type == RobotType.UF:
+    #         if camera_type == CameraType.Azure:
+    #             cam_offset_pos = torch.tensor([-0.0, -0.075, 0.075], device=hand_pos.device).repeat(self.num_envs, 1)
+    #             q_cam_in_hand = torch.tensor([0.0, -0.7071, 0.0, 0.7071], device=hand_pos.device).repeat(self.num_envs, 1)
+    #         if camera_type == CameraType.Sim:
+    #             cam_offset_pos = torch.tensor([0.0, 0.0, 0.1], device=hand_pos.device).repeat(self.num_envs, 1)
+    #             q_cam_in_hand = torch.tensor([0.0, -0.7071, 0.0, 0.7071], device=hand_pos.device).repeat(self.num_envs, 1)
+    #     elif robot_type == RobotType.DOOSAN:
+    #         cam_offset_pos = torch.tensor([0.0, 0.0, 0.0], device=hand_pos.device).repeat(self.num_envs, 1)
+    #         # q_cam_in_hand = torch.tensor([-0.5, 0.5, -0.5, -0.5], device=hand_pos.device).repeat(self.num_envs, 1)
+    #         q_cam_in_hand = torch.tensor([0.0, -0.707, 0.707, 0.0], device=hand_pos.device).repeat(self.num_envs, 1)
 
-        hand_rot_matrix = kornia.geometry.conversions.quaternion_to_rotation_matrix(hand_rot)
-        cam_offset_pos_world = torch.bmm(hand_rot_matrix, cam_offset_pos.unsqueeze(-1)).squeeze(-1)
+    #     hand_rot_matrix = kornia.geometry.conversions.quaternion_to_rotation_matrix(hand_rot)
+    #     cam_offset_pos_world = torch.bmm(hand_rot_matrix, cam_offset_pos.unsqueeze(-1)).squeeze(-1)
 
-        camera_pos_w = hand_pos + cam_offset_pos_world
-        camera_pos_w = camera_pos_w - self.scene.env_origins
+    #     camera_pos_w = hand_pos + cam_offset_pos_world
+    #     camera_pos_w = camera_pos_w - self.scene.env_origins
         
-        camera_rot_w = self.quat_mul(hand_rot, q_cam_in_hand)
-        # camera_rot_w = self.robot_grasp_rot
+    #     camera_rot_w = self.quat_mul(hand_rot, q_cam_in_hand)
+    #     # camera_rot_w = self.robot_grasp_rot
 
+    #     return camera_pos_w, camera_rot_w
+
+    # def compute_camera_world_pose(self, hand_pos, hand_rot):
+    #     # [수정] 모든 if/elif 분기를 제거합니다.
+    #     # __init__ (L1089)의 t_cam_to_gripper_mm에서 계산된
+    #     # T_gripper_to_cam (self.R_gripper_to_cam, self.t_gripper_to_cam)을 
+    #     # 유일한 Transform 값으로 사용합니다.
+        
+    #     q_cam_in_hand = self.R_gripper_to_cam.repeat(self.num_envs, 1)
+    #     cam_offset_pos = self.t_gripper_to_cam.repeat(self.num_envs, 1)
+
+    #     # [수정] _get_observations (L1620)와 동일한 tf_combine 로직 사용
+    #     # hand_pos는 월드 절대 좌표 기준 (예: [0.5, 0.1, 0.3])
+    #     camera_rot_w, camera_pos_w_abs = tf_combine(
+    #         hand_rot,
+    #         hand_pos,
+    #         q_cam_in_hand,
+    #         cam_offset_pos
+    #     )
+        
+    #     # 보상 계산은 씬 오리진(env_origins) 기준 상대 좌표를 사용해야 합니다.
+    #     camera_pos_w = camera_pos_w_abs - self.scene.env_origins
+
+    #     return camera_pos_w, camera_rot_w
+
+    def compute_camera_world_pose(self, hand_pos, hand_rot):
+        # [수정] 역변환 값 대신 원본 캘리브레이션 값(local)을 사용합니다.
+        q_cam_in_hand = self.R_cam_to_gripper_local.repeat(self.num_envs, 1)
+        cam_offset_pos = self.t_cam_to_gripper_local.repeat(self.num_envs, 1)
+
+        # R_wc = R_wg * R_gc
+        # t_wc = R_wg * t_gc + t_wg
+        camera_rot_w, camera_pos_w_abs = tf_combine(
+            hand_rot,           # R_wg, t_wg
+            hand_pos,
+            q_cam_in_hand,      # R_gc
+            cam_offset_pos      # t_gc
+        )
+        
+        camera_pos_w = camera_pos_w_abs - self.scene.env_origins
         return camera_pos_w, camera_rot_w
 
     def world_to_camera_pose(self, camera_pos_w, camera_rot_w, obj_pos_w, obj_rot_w):
@@ -1438,19 +1461,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
         self.actions = actions.clone().clamp(-1.0, 1.0)
         
-        # [수정 시작] ---------------------------------------------------------
-        # (self.num_envs,) 텐서를 (self.num_envs, 1)로 브로드캐스팅
-        # current_action_scale = self.action_scale_tensor.unsqueeze(-1) 
-
-        # 글로벌 self.cfg.action_scale 대신 개별 텐서(current_action_scale)를 사용
-        # targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * self.actions * current_action_scale
-        # [수정 끝] -----------------------------------------------------------
-        
-        # targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * self.actions * self.cfg.action_scale
-        # self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
-        
-        # [수정 시작] ---------------------------------------------------------
-        # 1. 정책(actions)에 따른 잠재적 다음 목표 위치 계산
         current_action_scale = self.action_scale_tensor.unsqueeze(-1) 
         potential_targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * self.actions * current_action_scale
         potential_targets_clamped = torch.clamp(potential_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
@@ -1590,17 +1600,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                     rad_speed = math.radians(ang_speed)
                     rad_mvacc = math.radians(angmvacc)
 
-                    # self.arm.set_servo_angle(angle=angle_cmd, speed=rad_speed, wait=False, is_radian=True, mvacc = rad_mvacc)
-
-                    # print("self.box_grasp_pos : ", self.box_grasp_pos)
-
-                    # x = float(self.box_grasp_pos[0, 0].cpu()) * 1000
-                    # y = float(self.box_grasp_pos[0, 1].cpu()) * 1000
-                    # z = float(self.box_grasp_pos[0, 2].cpu()) * 1000
-
-                    # self.arm.set_position(x=x, y=y, z=z, roll=-180, pitch=0, yaw=0, speed=200, wait=False)
-
-            
             elif robot_action == False and robot_init_pose == False:
                 init_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
 
@@ -1683,10 +1682,34 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         # Refresh the intermediate values after the physics steps
         self._compute_intermediate_values()
         
-        if camera_type == CameraType.Azure:
+
+        if yolo_mode: 
+            # 1. 실제 로봇의 TCP(손) 위치/회전을 가져옵니다.
             hand_pos_real, hand_rot_real = self.get_real_hand_pose()
-            camera_pos_w, camera_rot_w = self.compute_camera_world_pose(hand_pos_real, hand_rot_real)
-        elif camera_type == CameraType.Sim:
+            
+            if hand_pos_real is None:
+                # [추가] 실제 로봇 포즈 읽기 실패 시 시뮬레이션 값으로 대체 (Fallback)
+                print("⚠️ [보상 계산] 실제 로봇 포즈 읽기 실패. 시뮬레이션 값으로 대체합니다.")
+                # _compute_intermediate_values()에서 계산된 시뮬레이션 로봇의 파지점 사용
+                hand_pos_input = self.robot_grasp_pos
+                hand_rot_input = self.robot_grasp_rot
+            else:
+                # [수정] 실제 로봇 값 사용.
+                # (참고: hand_pos_real은 [1, 3]이므로 [num_envs, 3]로 확장)
+                hand_pos_input = hand_pos_real.repeat(self.num_envs, 1)
+                hand_rot_input = hand_rot_real.repeat(self.num_envs, 1)
+            
+            # 2. (해결책 1에서 수정된) compute_camera_world_pose 호출
+            camera_pos_w, camera_rot_w = self.compute_camera_world_pose(hand_pos_input, hand_rot_input)
+
+            # print("*" * 50)
+            # print("hand_pos_real :", hand_pos_real)
+            # print("hand_rot_real :", hand_rot_real)
+            # print("camera_pos_w :", camera_pos_w)
+            # print("camera_rot_w :", camera_rot_w)
+
+        else: # (yolo_mode == False, 즉 순수 시뮬레이션 모드)
+            # 3. 기존과 동일하게 시뮬레이션 로봇의 파지점(robot_grasp_pos) 사용
             camera_pos_w, camera_rot_w = self.compute_camera_world_pose(self.robot_grasp_pos, self.robot_grasp_rot)
 
         self.box_pos_cam, box_rot_cam = self.world_to_camera_pose(
@@ -2092,97 +2115,14 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         self._compute_intermediate_values(env_ids)
         
         # [추가] 리셋 시 가시성 및 조인트 버퍼 초기화
-        # 리셋 직후에는 "보이지 않음" 상태로 시작하여 움직이지 않도록 합니다.
         self.is_object_visible_mask[env_ids] = False 
-        # 리셋된 로봇의 조인트 위치를 버퍼에 저장합니다.
         self.current_joint_pos_buffer[env_ids] = self._robot.data.joint_pos[env_ids]
 
         super()._reset_idx(env_ids)
-    
-    # def _get_observations(self) -> dict:
-        
-    #     dof_pos_scaled = (
-    #         2.0
-    #         * (self._robot.data.joint_pos - self.robot_dof_lower_limits)
-    #         / (self.robot_dof_upper_limits - self.robot_dof_lower_limits)
-    #         - 1.0
-    #     )
-        
-    #     global robot_action
-
-    #     if yolo_mode: 
-    #         hand_pos_real, hand_rot_real = self.get_real_hand_pose() # (XArm API)
-    #         if hand_pos_real is None:
-    #             print("⚠️ [오류] 실제 로봇 포즈를 읽을 수 없습니다. (get_real_hand_pose 실패)")
-    #             gripper_pos_world = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
-    #             gripper_rot_world = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
-    #         else:
-    #             gripper_pos_world = hand_pos_real.repeat(self.num_envs, 1)
-    #             gripper_rot_world = hand_rot_real.repeat(self.num_envs, 1)
-
-    #     else: # 시뮬레이션 모드일 때
-    #         gripper_pos_world = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
-    #         gripper_rot_world = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
-            
-    #     cam_rot_world_ros, cam_pos_world_ros = tf_combine(
-    #         gripper_rot_world, 
-    #         gripper_pos_world,
-    #         self.R_gripper_to_cam.repeat(self.num_envs, 1), # ⬅️ 2단계에서 만든 변수
-    #         self.t_gripper_to_cam.repeat(self.num_envs, 1)  # ⬅️ 2단계에서 만든 변수
-    #     )
-
-    #     if yolo_mode:
-    #         rclpy.spin_once(self.yolo_node, timeout_sec=0.01)
-    #         yolo_pos_raw = self.subscribe_yolo() 
-
-    #         if (yolo_pos_raw is not None):                
-    #             yolo_pos_cam_cv = yolo_pos_raw.repeat(self.num_envs, 1)
-    #             yolo_pos_cam_ros = torch.zeros_like(yolo_pos_cam_cv)
-
-    #             yolo_pos_cam_ros[:, 0] =  yolo_pos_cam_cv[:, 2]
-    #             yolo_pos_cam_ros[:, 1] = -yolo_pos_cam_cv[:, 0]
-    #             yolo_pos_cam_ros[:, 2] = -yolo_pos_cam_cv[:, 1]
-
-    #             object_pos_world_abs = tf_vector(cam_rot_world_ros, yolo_pos_cam_ros) + cam_pos_world_ros
-                
-    #             print("*" * 50)
-    #             print(f"yolo_pose_cam_ros : {yolo_pos_cam_ros}")
-    #             print(f"YOLO (World Td, NEW): {object_pos_world_abs[0]}") 
-
-    #             self.last_known_world_pos = object_pos_world_abs
-    #         else:
-    #             robot_action = False
-    #             print(f"\rYOLO (World Td, STALE): {self.last_known_world_pos[0]}   ", end="")
-
-    #         final_target_obs = self.last_known_world_pos
-        
-    #     else: # 시뮬레이션 모드
-    #         final_target_obs = self.box_grasp_pos - self.scene.env_origins
-    #         self.last_known_world_pos = final_target_obs
-
-    #     robot_base_pos = torch.tensor([0.0, 0.0, 0.0], device=self.device) 
-    #     final_target_relative = final_target_obs - robot_base_pos.repeat(self.num_envs, 1)
-
-    #     to_target = self.box_grasp_pos - self.robot_grasp_pos
-
-    #     obs = torch.cat(
-    #         (
-    #             dof_pos_scaled,
-    #             self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
-    #             # final_target_relative, # ⬅️ 올바르게 변환된 목표 좌표
-    #             to_target,
-    #             self._box.data.body_link_pos_w[:, 0, 2].unsqueeze(-1),
-    #             self._box.data.body_link_vel_w[:, 0, 2].unsqueeze(-1),
-    #         ),
-    #         dim=-1,
-    #     )
-        
-    #     return {"policy": torch.clamp(obs, -5.0, 5.0),}
 
     def _get_observations(self) -> dict:
 
         # [추가] 현재 조인트 위치 버퍼 업데이트
-        # 이 버퍼는 다음 _pre_physics_step에서 "정지" 명령으로 사용됩니다.
         self.current_joint_pos_buffer[:] = self._robot.data.joint_pos
         
         dof_pos_scaled = (
@@ -2215,12 +2155,19 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 self.robot_local_grasp_pos
             )
 
-            # 3. [REAL] 실제 카메라 좌표계 계산 (YOLO 좌표 변환용)
+            # # 3. [REAL] 실제 카메라 좌표계 계산 (YOLO 좌표 변환용)
+            # cam_rot_world_ros, cam_pos_world_ros = tf_combine(
+            #     gripper_link_rot_w, 
+            #     gripper_link_pos_w,
+            #     self.R_gripper_to_cam.repeat(self.num_envs, 1), 
+            #     self.t_gripper_to_cam.repeat(self.num_envs, 1)
+            # )
+
             cam_rot_world_ros, cam_pos_world_ros = tf_combine(
-                gripper_link_rot_w, 
-                gripper_link_pos_w,
-                self.R_gripper_to_cam.repeat(self.num_envs, 1), 
-                self.t_gripper_to_cam.repeat(self.num_envs, 1)
+                gripper_link_rot_w,                                   # ⬅️ 수정
+                gripper_link_pos_w,                                   # ⬅️ 수정
+                self.R_cam_to_gripper_local.repeat(self.num_envs, 1), # ⬅️ 수정
+                self.t_cam_to_gripper_local.repeat(self.num_envs, 1)  # ⬅️ 수정
             )
 
             # 4. [REAL] YOLO로부터 실제 물체 위치 가져오기
@@ -2238,9 +2185,9 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 # YOLO 좌표를 월드 좌표로 변환
                 object_pos_world_abs = tf_vector(cam_rot_world_ros, yolo_pos_cam_ros) + cam_pos_world_ros
                 
-                # print("*" * 50)
-                # print(f"yolo_pose_cam_ros : {yolo_pos_cam_ros}")
-                # print(f"YOLO (World Td, NEW): {object_pos_world_abs[0]}") 
+                print("*" * 50)
+                print(f"yolo_pose_cam_ros : {yolo_pos_cam_ros}")
+                print(f"YOLO (World Td, NEW): {object_pos_world_abs[0]}") 
 
                 self.last_known_world_pos = object_pos_world_abs
             else:
