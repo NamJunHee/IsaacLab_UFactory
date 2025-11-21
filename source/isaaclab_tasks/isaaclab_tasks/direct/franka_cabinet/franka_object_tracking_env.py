@@ -70,29 +70,27 @@ class ObjectMoveType(Enum):
     CIRCLE = "circle"
     LINEAR = "linear"
     STOP = "stop"
-object_move = ObjectMoveType.STATIC
-# object_move = ObjectMoveType.LINEAR
+# object_move = ObjectMoveType.STATIC
+object_move = ObjectMoveType.LINEAR
 # object_move = ObjectMoveType.STOP
 
-class CameraType(Enum):
-    Sim = "sim"
-    Azure = "azure"
-camera_type = CameraType.Sim
+# class CameraType(Enum):
+#     Sim = "sim"
+#     Azure = "azure"
+# camera_type = CameraType.Azure
 
 training_mode = False
-
-foundationpose_mode = False
-yolo_mode = True
 
 camera_enable = True
 image_publish = True
 
 robot_action = False
 robot_init_pose = False
-robot_fix = True
+robot_fix = False
 
-init_reward = True
 UFactory_set_mode = True
+real_robot_move = False
+yolo_mode = True
 
 add_episode_length = 200
 # add_episode_length = 600
@@ -694,13 +692,13 @@ class FrankaObjectTrackingEnvCfg(DirectRLEnvCfg):
                 width=640,
                 data_types=["rgb", "depth"],
                 spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=10.0, # 값이 클수록 확대
+                    focal_length=30.0, # 값이 클수록 확대
                     focus_distance=60.0,
                     horizontal_aperture=50.0,
                     clipping_range=(0.1, 1.0e5),
                 ),
                 offset=CameraCfg.OffsetCfg(
-                    pos=(0.0, 0.0, 0.1),
+                    pos=(0.07, 0.03, -0.13),
                     rot=(0.0, 0.707, 0.707, 0.0),
                     convention="ROS",
                 )
@@ -1125,8 +1123,8 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             
             self.bridge = CvBridge()
 
-            if camera_type == CameraType.Azure:
-                print("[IsaacLab] Initializing Azure camera...")
+            # if camera_type == CameraType.Azure:
+            #     print("[IsaacLab] Initializing Azure camera...")
                 # pykinect.initialize_libraries()
                 # self.device_config = pykinect.default_configuration
 
@@ -1145,19 +1143,20 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 # )
                 # self.k4a.start()
 
-        if foundationpose_mode:
-            self.latest_detection_msg = None
-            self.foundationpose_node = rclpy.create_node('foundationpose_receiver')
-            self.foundationpose_node.create_subscription(
-                Point,
-                '/object_position',
-                self.foundationpose_callback,
-                10
-            )
+        # if foundationpose_mode:
+        #     self.latest_detection_msg = None
+        #     self.foundationpose_node = rclpy.create_node('foundationpose_receiver')
+        #     self.foundationpose_node.create_subscription(
+        #         Point,
+        #         '/object_position',
+        #         self.foundationpose_callback,
+        #         10
+        #     )
 
         if yolo_mode:
             print("[IsaacLab] Initializing YOLO receiver node...")
             self.yolo_msg = None
+            self.yolo_pos_raw = None
             self.yolo_node = rclpy.create_node('yolo_receiver')
             self.yolo_node.create_subscription(
                 Point,
@@ -1208,6 +1207,13 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         self.last_known_world_pos = torch.zeros((self.num_envs, 3), 
                                                 device=self.device, 
                                                 dtype=torch.float32)
+        
+        # [수정] 지연 보상을 위한 변수 초기화
+        self.prev_hand_pos_real = None
+        self.prev_time_check = time.time()
+        self.SYSTEM_LATENCY = 0.40  # 약 80ms~100ms (YOLO 처리 + 통신 지연 시간, 상황에 맞춰 조절 필요)
+
+
 
     def publish_camera_data(self):
         env_id = 0
@@ -1365,36 +1371,16 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
     #     return camera_pos_w, camera_rot_w
 
-    # def compute_camera_world_pose(self, hand_pos, hand_rot):
-    #     # [수정] 모든 if/elif 분기를 제거합니다.
-    #     # __init__ (L1089)의 t_cam_to_gripper_mm에서 계산된
-    #     # T_gripper_to_cam (self.R_gripper_to_cam, self.t_gripper_to_cam)을 
-    #     # 유일한 Transform 값으로 사용합니다.
-        
-    #     q_cam_in_hand = self.R_gripper_to_cam.repeat(self.num_envs, 1)
-    #     cam_offset_pos = self.t_gripper_to_cam.repeat(self.num_envs, 1)
-
-    #     # [수정] _get_observations (L1620)와 동일한 tf_combine 로직 사용
-    #     # hand_pos는 월드 절대 좌표 기준 (예: [0.5, 0.1, 0.3])
-    #     camera_rot_w, camera_pos_w_abs = tf_combine(
-    #         hand_rot,
-    #         hand_pos,
-    #         q_cam_in_hand,
-    #         cam_offset_pos
-    #     )
-        
-    #     # 보상 계산은 씬 오리진(env_origins) 기준 상대 좌표를 사용해야 합니다.
-    #     camera_pos_w = camera_pos_w_abs - self.scene.env_origins
-
-    #     return camera_pos_w, camera_rot_w
-
     def compute_camera_world_pose(self, hand_pos, hand_rot):
-        # [수정] 역변환 값 대신 원본 캘리브레이션 값(local)을 사용합니다.
-        q_cam_in_hand = self.R_cam_to_gripper_local.repeat(self.num_envs, 1)
-        cam_offset_pos = self.t_cam_to_gripper_local.repeat(self.num_envs, 1)
 
-        # R_wc = R_wg * R_gc
-        # t_wc = R_wg * t_gc + t_wg
+        if yolo_mode: # camera_type == CameraType.Azure:
+            q_cam_in_hand = self.R_cam_to_gripper_local.repeat(self.num_envs, 1)
+            cam_offset_pos = self.t_cam_to_gripper_local.repeat(self.num_envs, 1)
+
+        else: # camera_type == CameraType.Sim:
+            cam_offset_pos = torch.tensor([0.0, 0.0, 0.1], device=hand_pos.device).repeat(self.num_envs, 1)
+            q_cam_in_hand = torch.tensor([0.0, -0.7071, 0.0, 0.7071], device=hand_pos.device).repeat(self.num_envs, 1)
+
         camera_rot_w, camera_pos_w_abs = tf_combine(
             hand_rot,           # R_wg, t_wg
             hand_pos,
@@ -1513,7 +1499,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             self._box.write_root_pose_to_sim(new_box_pose_circle)
         
         # 물체 위치 랜덤 선형 이동 --------------------------------------------------------------------------------------------------
-        if object_move == ObjectMoveType.LINEAR:
+        if object_move == ObjectMoveType.LINEAR and yolo_mode == False:
             distance_to_target = torch.norm(self.target_box_pos - self.new_box_pos_rand, p=2, dim = -1)
             if torch.any(distance_to_target < 0.01):
                 self.target_box_pos = torch.stack([
@@ -1572,9 +1558,9 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             target_pos[:, joint6_index] = 0.0
         
         if training_mode == False and robot_fix == False:
-
             if robot_action and robot_init_pose:
                 self._robot.set_joint_position_target(target_pos)
+                # print("target_pos :", target_pos)
 
                 if UFactory_set_mode:
                     # print("target_pos :", target_pos)
@@ -1589,11 +1575,14 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                     # print("xarm_actions :", xarm_actions)
                     angle_cmd = xarm_actions.detach().cpu().numpy().flatten().tolist()
 
-                    ang_speed = 150
-                    angmvacc = 100.0
+                    ang_speed = 50
+                    angmvacc = 10.0
 
                     rad_speed = math.radians(ang_speed)
                     rad_mvacc = math.radians(angmvacc)
+
+                    if real_robot_move:
+                        self.arm.set_servo_angle(angle=angle_cmd, speed=rad_speed, wait=False, is_radian=True, mvacc = rad_mvacc)
 
             elif robot_action == False and robot_init_pose == False:
                 init_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
@@ -1607,21 +1596,22 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 joint_err = torch.abs(self._robot.data.joint_pos - init_pos)
                 max_err = torch.max(joint_err).item()
                 
-                if foundationpose_mode:
-                    pos = self.subscribe_object_pos()
-                    if (max_err < 0.3) and (pos is not None):
-                        self.init_cnt += 1
-                        print(f"init_cnt : {self.init_cnt}")
+                # if foundationpose_mode:
+                #     pos = self.subscribe_object_pos()
+                #     if (max_err < 0.3) and (pos is not None):
+                #         self.init_cnt += 1
+                #         print(f"init_cnt : {self.init_cnt}")
                         
-                        if self.init_cnt > 50: 
-                            robot_action = True
-                            robot_init_pose = True
+                #         if self.init_cnt > 50: 
+                #             robot_action = True
+                #             robot_init_pose = True
                 
-                elif yolo_mode :
+                if yolo_mode :
                     print("[IsaacLab] Waiting for YOLO detection...")
-                    pos = self.subscribe_yolo()
-                    print(f"[IsaacLab] YOLO detected position: {pos}")
-                    if (max_err < 0.3) and (pos is not None):
+                    is_visible = self.is_object_visible_mask[0].item()
+                    print(f"[IsaacLab] Object is visible: {is_visible}")
+
+                    if (max_err < 0.3) and is_visible: 
                         self.init_cnt += 1
                         print(f"init_cnt : {self.init_cnt}")
                               
@@ -1629,7 +1619,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                             robot_action = True
                             robot_init_pose = True
                             
-                elif foundationpose_mode == False and yolo_mode == False and max_err < 0.3:
+                elif yolo_mode == False and max_err < 0.3 : #and foundationpose_mode == False:
                     self.init_cnt += 1
                     print(f"init_cnt : {self.init_cnt}")
                     if self.init_cnt > 30:
@@ -1673,72 +1663,258 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         
         return terminated, truncated
 
+    # def _get_rewards(self) -> torch.Tensor:
+    #     self._compute_intermediate_values()
+        
+    #     if yolo_mode: 
+    #         hand_pos_real, hand_rot_real = self.get_real_hand_pose()
+            
+    #         if hand_pos_real is None:
+    #             print("⚠️ [보상 계산] 실제 로봇 포즈 읽기 실패. 시뮬레이션 값으로 대체합니다.")
+    #             hand_pos_input = self.robot_grasp_pos
+    #             hand_rot_input = self.robot_grasp_rot
+    #         else:
+    #             hand_pos_input = hand_pos_real.repeat(self.num_envs, 1)
+    #             hand_rot_input = hand_rot_real.repeat(self.num_envs, 1)
+            
+    #         camera_pos_w, camera_rot_w = self.compute_camera_world_pose(hand_pos_input, hand_rot_input)
+
+    #         # print("*" * 50)
+    #         # print("hand_pos_real :", hand_pos_real)
+    #         # print("hand_rot_real :", hand_rot_real)
+    #         # print("camera_pos_w :", camera_pos_w)
+    #         # print("camera_rot_w :", camera_rot_w)
+    #     else: 
+    #         camera_pos_w, camera_rot_w = self.compute_camera_world_pose(self.robot_grasp_pos, self.robot_grasp_rot)
+
+    #     self.box_pos_cam, box_rot_cam = self.world_to_camera_pose(
+    #         camera_pos_w, camera_rot_w,
+    #         self.box_grasp_pos - self.scene.env_origins, self.box_grasp_rot,
+    #     )
+
+    #     gripper_to_box_dist = torch.norm(self.robot_grasp_pos - self.box_grasp_pos, p=2, dim=-1)
+
+    #     center_offset = torch.norm(self.box_pos_cam[:, [2, 1]], dim=-1)
+    #     out_of_fov_mask = center_offset > 0.3
+    #     is_behind_mask = self.box_pos_cam[:, 0] > 0 
+    #     self.is_pview_fail = out_of_fov_mask | is_behind_mask
+    #     self.is_object_visible_mask = ~self.is_pview_fail
+
+    #     reward = self._compute_rewards(
+    #         self.actions,
+    #         gripper_to_box_dist,
+    #         self.robot_grasp_pos,
+    #         self.box_grasp_pos,
+    #         self.robot_grasp_rot,
+    #         self.box_grasp_rot,
+    #         self.box_pos_cam,
+    #         box_rot_cam,
+    #         self.gripper_forward_axis,
+    #         self.gripper_up_axis,
+    #     )
+
+    #     return reward
+    
+    # def _get_rewards(self) -> torch.Tensor:
+    #     # 1. 시뮬레이션 포즈 계산 (시뮬레이션 모드 또는 fallback 시 사용)
+    #     self._compute_intermediate_values()
+        
+    #     if yolo_mode: 
+    #         # --- A. Get REAL Gripper Pose ---
+    #         hand_pos_real, hand_rot_real = self.get_real_hand_pose()
+            
+    #         if hand_pos_real is None:
+    #             print("⚠️ [보상 계산] 실제 로봇 포즈 읽기 실패. 시뮬레이션 값으로 대체합니다.")
+    #             # 시뮬레이션 값으로 Fallback
+    #             hand_pos_input = self.robot_grasp_pos
+    #             hand_rot_input = self.robot_grasp_rot
+    #         else:
+    #             # 실제 로봇 값 사용
+    #             hand_pos_input = hand_pos_real.repeat(self.num_envs, 1)
+    #             hand_rot_input = hand_rot_real.repeat(self.num_envs, 1)
+            
+    #         # [REAL] 실제 로봇 링크 위치로부터 "Grasp" 포즈 계산
+    #         real_gripper_grasp_rot, real_gripper_grasp_pos = tf_combine(
+    #             hand_rot_input, 
+    #             hand_pos_input,
+    #             self.robot_local_grasp_rot, 
+    #             self.robot_local_grasp_pos
+    #         )
+            
+    #         # [REAL] 실제 로봇 위치로부터 "Camera" 포즈 계산
+    #         camera_pos_w, camera_rot_w = self.compute_camera_world_pose(hand_pos_input, hand_rot_input)
+            
+    #         # --- B. Get REAL Object Pose ---
+    #         # _get_observations()에서 YOLO를 통해 계산하고 저장해 둔 값 사용
+    #         real_object_grasp_pos = self.last_known_world_pos
+    #         # (YOLO는 회전값을 주지 않으므로, 시뮬레이션 값을 임시 사용)
+    #         real_object_grasp_rot = self.box_grasp_rot 
+
+    #         # --- C. [REAL] Set Inputs for _compute_rewards ---
+            
+    #         # Arg 1: [REAL] Distance
+    #         dist_input = torch.norm(real_gripper_grasp_pos - real_object_grasp_pos, p=2, dim=-1)
+            
+    #         # Arg 2-5: [REAL] Poses
+    #         gripper_grasp_pos_input = real_gripper_grasp_pos
+    #         object_grasp_pos_input = real_object_grasp_pos
+    #         gripper_grasp_rot_input = real_gripper_grasp_rot
+    #         object_grasp_rot_input = real_object_grasp_rot # (Placeholder)
+
+    #         # Arg 6-7: [REAL] PView (Camera-frame poses)
+    #         # `self.last_known_world_pos`는 절대 좌표이므로 env_origins를 빼서 로컬화
+    #         real_object_pos_local = real_object_grasp_pos - self.scene.env_origins
+    #         box_pos_cam_input, box_rot_cam_input = self.world_to_camera_pose(
+    #             camera_pos_w, camera_rot_w,
+    #             real_object_pos_local,  # <-- REAL object pos
+    #             real_object_grasp_rot   # <-- Placeholder rot
+    #         )
+            
+    #         # [NOTE] yolo_mode일 때는 _get_observations()가
+    #         # 이미 'self.is_object_visible_mask'를 설정했으므로 여기서는 덮어쓰지 않습니다.
+
+    #     else: 
+    #         # --- SIMULATION Mode (Original Logic) ---
+            
+    #         # [SIM] 시뮬레이션 "Camera" 포즈 계산
+    #         camera_pos_w, camera_rot_w = self.compute_camera_world_pose(self.robot_grasp_pos, self.robot_grasp_rot)
+            
+    #         # [SIM] 시뮬레이션 PView 계산
+    #         box_pos_cam_sim, box_rot_cam_sim = self.world_to_camera_pose(
+    #             camera_pos_w, camera_rot_w,
+    #             self.box_grasp_pos - self.scene.env_origins, self.box_grasp_rot,
+    #         )
+            
+    #         # --- C. [SIM] Set Inputs for _compute_rewards ---
+    #         dist_input = torch.norm(self.robot_grasp_pos - self.box_grasp_pos, p=2, dim=-1)
+    #         gripper_grasp_pos_input = self.robot_grasp_pos
+    #         object_grasp_pos_input = self.box_grasp_pos
+    #         gripper_grasp_rot_input = self.robot_grasp_rot
+    #         object_grasp_rot_input = self.box_grasp_rot
+    #         box_pos_cam_input = box_pos_cam_sim
+    #         box_rot_cam_input = box_rot_cam_sim
+            
+    #         # [CRITICAL] 시뮬레이션 모드일 때만 시뮬레이션 데이터로 가시성 마스크 갱신
+    #         center_offset = torch.norm(box_pos_cam_input[:, [2, 1]], dim=-1)
+    #         out_of_fov_mask = center_offset > 0.3
+    #         is_behind_mask = box_pos_cam_input[:, 0] > 0 
+    #         self.is_pview_fail = out_of_fov_mask | is_behind_mask
+    #         self.is_object_visible_mask = ~self.is_pview_fail
+
+    #     # --- D. Call Reward Function ---
+    #     # 이제 dist_input, ... , box_pos_cam_input 변수들은
+    #     # yolo_mode이든 아니든 해당 모드에 100% 일치하는 데이터로 채워졌습니다.
+    #     reward = self._compute_rewards(
+    #         self.actions,
+    #         dist_input,
+    #         gripper_grasp_pos_input,
+    #         object_grasp_pos_input,
+    #         gripper_grasp_rot_input,
+    #         object_grasp_rot_input,
+    #         box_pos_cam_input,
+    #         box_rot_cam_input,
+    #         self.gripper_forward_axis,
+    #         self.gripper_up_axis,
+    #     )
+
+    #     return reward
+
     def _get_rewards(self) -> torch.Tensor:
-        # Refresh the intermediate values after the physics steps
         self._compute_intermediate_values()
         
-
         if yolo_mode: 
-            # 1. 실제 로봇의 TCP(손) 위치/회전을 가져옵니다.
             hand_pos_real, hand_rot_real = self.get_real_hand_pose()
             
             if hand_pos_real is None:
-                # [추가] 실제 로봇 포즈 읽기 실패 시 시뮬레이션 값으로 대체 (Fallback)
-                print("⚠️ [보상 계산] 실제 로봇 포즈 읽기 실패. 시뮬레이션 값으로 대체합니다.")
-                # _compute_intermediate_values()에서 계산된 시뮬레이션 로봇의 파지점 사용
-                hand_pos_input = self.robot_grasp_pos
-                hand_rot_input = self.robot_grasp_rot
+                hand_pos_input = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
+                hand_rot_input = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
             else:
-                # [수정] 실제 로봇 값 사용.
-                # (참고: hand_pos_real은 [1, 3]이므로 [num_envs, 3]로 확장)
                 hand_pos_input = hand_pos_real.repeat(self.num_envs, 1)
                 hand_rot_input = hand_rot_real.repeat(self.num_envs, 1)
             
-            # 2. (해결책 1에서 수정된) compute_camera_world_pose 호출
+            sim_gripper_grasp_pos = self.robot_grasp_pos
+            sim_gripper_grasp_rot = self.robot_grasp_rot
+            
             camera_pos_w, camera_rot_w = self.compute_camera_world_pose(hand_pos_input, hand_rot_input)
+            
+            real_object_grasp_pos = self.last_known_world_pos
+            real_object_grasp_rot = self.box_grasp_rot 
 
-            # print("*" * 50)
-            # print("hand_pos_real :", hand_pos_real)
-            # print("hand_rot_real :", hand_rot_real)
-            # print("camera_pos_w :", camera_pos_w)
-            # print("camera_rot_w :", camera_rot_w)
+            dist_input = torch.norm(sim_gripper_grasp_pos - real_object_grasp_pos, p=2, dim=-1)
+            dist_input = torch.norm(hand_pos_real - real_object_grasp_pos, p=2, dim=-1)
+            
+            gripper_grasp_pos_input = hand_pos_real  
+            object_grasp_pos_input = real_object_grasp_pos
+            gripper_grasp_rot_input = hand_rot_real
+            object_grasp_rot_input = real_object_grasp_rot
 
-        else: # (yolo_mode == False, 즉 순수 시뮬레이션 모드)
-            # 3. 기존과 동일하게 시뮬레이션 로봇의 파지점(robot_grasp_pos) 사용
+            real_object_pos_local = real_object_grasp_pos - self.scene.env_origins
+            # box_pos_cam_input, box_rot_cam_input = self.world_to_camera_pose(
+            #     camera_pos_w, camera_rot_w,
+            #     real_object_pos_local,  # <-- REAL object pos
+            #     real_object_grasp_rot   # <-- Placeholder rot
+            # )
+            
+            # [수정] YOLO 값 유무 확인
+            if self.yolo_pos_raw is not None:
+                # 1. YOLO 데이터가 있을 때 (마지막 유효 값 포함)
+                yolo_pos_cv = self.yolo_pos_raw.repeat(self.num_envs, 1)
+                
+                # CV(Z-forward) -> ROS(X-forward) 좌표계 변환
+                box_pos_cam_input = torch.zeros_like(yolo_pos_cv)
+                box_pos_cam_input[:, 0] =  yolo_pos_cv[:, 0] # Z -> X
+                box_pos_cam_input[:, 1] =  yolo_pos_cv[:, 1] # X -> -Y
+                box_pos_cam_input[:, 2] =  yolo_pos_cv[:, 2] # Y -> -Z
+
+                # 시야 마스크 업데이트
+                center_offset = torch.norm(box_pos_cam_input[:, [2, 1]], dim=-1)
+                is_in_front = box_pos_cam_input[:, 0] > 0 
+                out_of_fov_mask = center_offset > 0.3
+                
+                self.is_pview_fail = out_of_fov_mask | (~is_in_front)
+                self.is_object_visible_mask = ~self.is_pview_fail
+                
+            else:
+                # 2. YOLO 데이터가 아예 없을 때 (None) -> 로봇 정지 & 더미 값
+                box_pos_cam_input = torch.zeros((self.num_envs, 3), device=self.device)
+                
+                # [중요 수정] [:] 제거하고 torch.ones로 새로 할당 (에러 해결)
+                # is_pview_fail = True (실패 처리) -> 그래야 시야 확보 보상을 못 받음
+                self.is_pview_fail = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+                
+                # 로봇 정지 (움직이지 않음)
+                self.is_object_visible_mask[:] = False
+            
+        else: #not yolo
             camera_pos_w, camera_rot_w = self.compute_camera_world_pose(self.robot_grasp_pos, self.robot_grasp_rot)
-
-        self.box_pos_cam, box_rot_cam = self.world_to_camera_pose(
-            camera_pos_w, camera_rot_w,
-            self.box_grasp_pos - self.scene.env_origins, self.box_grasp_rot,
-        )
-
-        gripper_to_box_dist = torch.norm(self.robot_grasp_pos - self.box_grasp_pos, p=2, dim=-1)
-
-        # 1. 시야 중심 이탈 마스크 (center_offset > margin)
-        center_offset = torch.norm(self.box_pos_cam[:, [2, 1]], dim=-1)
-        out_of_fov_mask = center_offset > 0.3
-
-        # 2. 물체가 카메라 뒤에 위치하는 마스크 (is_in_front_mask 반대)
-        # print("self.box_pos_cam[:, 0] :", self.box_pos_cam[:, 0])
-        is_behind_mask = self.box_pos_cam[:, 0] > 0 
-
-        # 3. 최종 PView 실패 마스크
-        self.is_pview_fail = out_of_fov_mask | is_behind_mask
-        
-        # --- [추가] 객체 가시성 마스크 업데이트 ---
-        # self.is_pview_fail가 True이면 "시야 밖"이므로, 
-        # is_object_visible_mask는 그 반대(~)가 됩니다.
-        self.is_object_visible_mask = ~self.is_pview_fail
+            
+            box_pos_cam_sim, box_rot_cam_sim = self.world_to_camera_pose(
+                camera_pos_w, camera_rot_w,
+                self.box_grasp_pos - self.scene.env_origins, self.box_grasp_rot,
+            )
+            
+            dist_input = torch.norm(self.robot_grasp_pos - self.box_grasp_pos, p=2, dim=-1)
+            gripper_grasp_pos_input = self.robot_grasp_pos
+            object_grasp_pos_input = self.box_grasp_pos
+            gripper_grasp_rot_input = self.robot_grasp_rot
+            object_grasp_rot_input = self.box_grasp_rot
+            box_pos_cam_input = box_pos_cam_sim
+            box_rot_cam_input = box_rot_cam_sim
+            
+            center_offset = torch.norm(box_pos_cam_input[:, [2, 1]], dim=-1)
+            out_of_fov_mask = center_offset > 0.3
+            is_behind_mask = box_pos_cam_input[:, 0] > 0 
+            self.is_pview_fail = out_of_fov_mask | is_behind_mask
+            self.is_object_visible_mask = ~self.is_pview_fail
 
         reward = self._compute_rewards(
             self.actions,
-            gripper_to_box_dist,
-            self.robot_grasp_pos,
-            self.box_grasp_pos,
-            self.robot_grasp_rot,
-            self.box_grasp_rot,
-            self.box_pos_cam,
-            box_rot_cam,
+            dist_input,
+            gripper_grasp_pos_input,
+            object_grasp_pos_input,
+            gripper_grasp_rot_input,
+            object_grasp_rot_input,
+            box_pos_cam_input,
             self.gripper_forward_axis,
             self.gripper_up_axis,
         )
@@ -1969,7 +2145,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             
             self.episode_init_joint_pos[env_ids] = joint_pos
 
-
     def _reset_idx(self, env_ids: torch.Tensor | None):         
         current_reward_levels = self.current_reward_level[env_ids]
         avg_reward = self.episode_reward_buf[env_ids] / self.episode_length_buf[env_ids]
@@ -2115,6 +2290,93 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
         super()._reset_idx(env_ids)
 
+    # def _get_observations(self) -> dict:
+    #     global robot_action
+    #     self.current_joint_pos_buffer[:] = self._robot.data.joint_pos
+        
+    #     dof_pos_scaled = (
+    #         2.0
+    #         * (self._robot.data.joint_pos - self.robot_dof_lower_limits)
+    #         / (self.robot_dof_upper_limits - self.robot_dof_lower_limits)
+    #         - 1.0
+    #     )
+        
+    #     if yolo_mode: 
+    #         hand_pos_real, hand_rot_real = self.get_real_hand_pose() # (XArm API)
+    #         if hand_pos_real is None:
+    #             print("⚠️ [오류] 실제 로봇 포즈를 읽을 수 없습니다. (fallback to sim)")
+    #             # 에러 발생 시 시뮬레이션 값으로 대체
+    #             gripper_link_pos_w = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
+    #             gripper_link_rot_w = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
+    #         else:
+    #             gripper_link_pos_w = hand_pos_real.repeat(self.num_envs, 1)
+    #             gripper_link_rot_w = hand_rot_real.repeat(self.num_envs, 1)
+            
+    #         _, real_gripper_grasp_pos = tf_combine(
+    #             gripper_link_rot_w, 
+    #             gripper_link_pos_w,
+    #             self.robot_local_grasp_rot, 
+    #             self.robot_local_grasp_pos
+    #         )
+
+    #         cam_rot_world_ros, cam_pos_world_ros = tf_combine(
+    #             gripper_link_rot_w,                                   # ⬅️ 수정
+    #             gripper_link_pos_w,                                   # ⬅️ 수정
+    #             self.R_cam_to_gripper_local.repeat(self.num_envs, 1), # ⬅️ 수정
+    #             self.t_cam_to_gripper_local.repeat(self.num_envs, 1)  # ⬅️ 수정
+    #         )
+
+    #         rclpy.spin_once(self.yolo_node, timeout_sec=0.01)
+    #         yolo_pos_raw = self.subscribe_yolo() 
+
+    #         if (yolo_pos_raw is not None):
+    #             self.is_object_visible_mask[:] = True
+                
+    #             yolo_pos_cam_cv = yolo_pos_raw.repeat(self.num_envs, 1)
+    #             yolo_pos_cam_ros = torch.zeros_like(yolo_pos_cam_cv)
+
+    #             yolo_pos_cam_ros[:, 0] =  yolo_pos_cam_cv[:, 2]
+    #             yolo_pos_cam_ros[:, 1] = -yolo_pos_cam_cv[:, 0]
+    #             yolo_pos_cam_ros[:, 2] = -yolo_pos_cam_cv[:, 1]
+
+    #             object_pos_world_abs = tf_vector(cam_rot_world_ros, yolo_pos_cam_ros) + cam_pos_world_ros
+                
+    #             print("*" * 50)
+    #             print(f"yolo_pose_cam_ros : {yolo_pos_cam_ros}")
+    #             print(f"YOLO (World Td, NEW): {object_pos_world_abs[0]}") 
+
+    #             self.last_known_world_pos = object_pos_world_abs
+    #         else:
+    #             self.is_object_visible_mask[:] = False
+    #             robot_action = False
+
+    #         real_object_grasp_pos = self.last_known_world_pos
+
+    #         print("real_object_grasp_pos :", real_object_grasp_pos)
+    #         to_target = real_object_grasp_pos - real_gripper_grasp_pos
+
+    #         object_z_pos = real_object_grasp_pos[:, 2].unsqueeze(-1)
+    #         object_z_vel = torch.zeros_like(object_z_pos)
+
+    #     else: # 시뮬레이션 모드 (yolo_mode = False)
+    #         print("self.box_grasp_pos :", self.box_grasp_pos)
+    #         to_target = self.box_grasp_pos - self.robot_grasp_pos
+    #         object_z_pos = self._box.data.body_link_pos_w[:, 0, 2].unsqueeze(-1)
+    #         object_z_vel = self._box.data.body_link_vel_w[:, 0, 2].unsqueeze(-1)
+
+    #     obs = torch.cat(
+    #         (
+    #             dof_pos_scaled,
+    #             self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
+    #             to_target,      # <-- 이제 yolo_mode에 따라 올바른 값이 들어감
+    #             object_z_pos,   # <-- 이제 yolo_mode에 따라 올바른 값이 들어감
+    #             object_z_vel,   # <-- 이제 yolo_mode에 따라 올바른 값이 들어감
+    #         ),
+    #         dim=-1,
+    #     )
+        
+    #     return {"policy": torch.clamp(obs, -5.0, 5.0),}
+
     def _get_observations(self) -> dict:
         global robot_action
         self.current_joint_pos_buffer[:] = self._robot.data.joint_pos
@@ -2127,61 +2389,117 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         )
         
         if yolo_mode: 
+            # hand_pos_real, hand_rot_real = self.get_real_hand_pose() # (XArm API)
+            # if hand_pos_real is None:
+            #     gripper_link_pos_w = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
+            #     gripper_link_rot_w = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
+            # else:
+            #     gripper_link_pos_w = hand_pos_real.repeat(self.num_envs, 1)
+            #     gripper_link_rot_w = hand_rot_real.repeat(self.num_envs, 1)
+            
+            # cam_rot_world_ros, cam_pos_world_ros = tf_combine(
+            #     gripper_link_rot_w,                                   
+            #     gripper_link_pos_w,                                   
+            #     self.R_cam_to_gripper_local.repeat(self.num_envs, 1), 
+            #     self.t_cam_to_gripper_local.repeat(self.num_envs, 1)  
+            # )
+
+            # rclpy.spin_once(self.yolo_node, timeout_sec=0.01)
+            # yolo_pos_raw = self.subscribe_yolo() 
+
+            # if (yolo_pos_raw is not None):
+            #     self.is_object_visible_mask[:] = True
+                
+            #     yolo_pos_cam_cv = yolo_pos_raw.repeat(self.num_envs, 1)
+            #     yolo_pos_cam_ros = torch.zeros_like(yolo_pos_cam_cv)
+
+            #     yolo_pos_cam_ros[:, 0] =  yolo_pos_cam_cv[:, 2]
+            #     yolo_pos_cam_ros[:, 1] = -yolo_pos_cam_cv[:, 0]
+            #     yolo_pos_cam_ros[:, 2] = -yolo_pos_cam_cv[:, 1]
+
+            #     object_pos_world_abs = tf_vector(cam_rot_world_ros, yolo_pos_cam_ros) + cam_pos_world_ros
+                
+            #     # print("*" * 50)
+            #     # print(f"yolo_pose_cam_ros : {yolo_pos_cam_ros}")
+            #     # print(f"YOLO (World Td, NEW): {object_pos_world_abs[0]}") 
+                
+            #     current_sim_box_rot = self._box.data.body_link_quat_w[:, 0, :].clone()
+            #     new_sim_box_pose = torch.cat([object_pos_world_abs, current_sim_box_rot], dim=-1)
+                
+            #     self._box.write_root_pose_to_sim(new_sim_box_pose)
+            #     self.last_known_world_pos = object_pos_world_abs
+                
+            # else:
+            #     self.is_object_visible_mask[:] = False
+
             hand_pos_real, hand_rot_real = self.get_real_hand_pose() # (XArm API)
+            
+            current_time = time.time()
+            if self.prev_hand_pos_real is None:
+                self.prev_hand_pos_real = hand_pos_real if hand_pos_real is not None else torch.zeros(3, device=self.device)
+                hand_vel_real = torch.zeros(3, device=self.device)
+            elif hand_pos_real is not None:
+                dt_real = current_time - self.prev_time_check
+                if dt_real > 0:
+                    hand_vel_real = (hand_pos_real - self.prev_hand_pos_real) / dt_real
+                else:
+                    hand_vel_real = torch.zeros(3, device=self.device)
+                
+                self.prev_hand_pos_real = hand_pos_real
+                self.prev_time_check = current_time
+            else:
+                hand_vel_real = torch.zeros(3, device=self.device)
+
             if hand_pos_real is None:
                 print("⚠️ [오류] 실제 로봇 포즈를 읽을 수 없습니다. (fallback to sim)")
-                # 에러 발생 시 시뮬레이션 값으로 대체
                 gripper_link_pos_w = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
                 gripper_link_rot_w = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
             else:
                 gripper_link_pos_w = hand_pos_real.repeat(self.num_envs, 1)
                 gripper_link_rot_w = hand_rot_real.repeat(self.num_envs, 1)
             
-            _, real_gripper_grasp_pos = tf_combine(
-                gripper_link_rot_w, 
-                gripper_link_pos_w,
-                self.robot_local_grasp_rot, 
-                self.robot_local_grasp_pos
+            cam_rot_world_ros, cam_pos_world_ros = tf_combine(
+                gripper_link_rot_w,                                   
+                gripper_link_pos_w,                                   
+                self.R_cam_to_gripper_local.repeat(self.num_envs, 1), 
+                self.t_cam_to_gripper_local.repeat(self.num_envs, 1)  
             )
 
-            cam_rot_world_ros, cam_pos_world_ros = tf_combine(
-                gripper_link_rot_w,                                   # ⬅️ 수정
-                gripper_link_pos_w,                                   # ⬅️ 수정
-                self.R_cam_to_gripper_local.repeat(self.num_envs, 1), # ⬅️ 수정
-                self.t_cam_to_gripper_local.repeat(self.num_envs, 1)  # ⬅️ 수정
-            )
+            velocity_compensation = hand_vel_real.repeat(self.num_envs, 1) * self.SYSTEM_LATENCY
+            cam_pos_world_ros_compensated = cam_pos_world_ros - velocity_compensation
 
             rclpy.spin_once(self.yolo_node, timeout_sec=0.01)
-            yolo_pos_raw = self.subscribe_yolo() 
+            self.yolo_pos_raw = self.subscribe_yolo() 
 
-            if (yolo_pos_raw is not None):
+            if (self.yolo_pos_raw is not None):
                 self.is_object_visible_mask[:] = True
                 
-                yolo_pos_cam_cv = yolo_pos_raw.repeat(self.num_envs, 1)
+                yolo_pos_cam_cv = self.yolo_pos_raw.repeat(self.num_envs, 1)
                 yolo_pos_cam_ros = torch.zeros_like(yolo_pos_cam_cv)
 
                 yolo_pos_cam_ros[:, 0] =  yolo_pos_cam_cv[:, 2]
                 yolo_pos_cam_ros[:, 1] = -yolo_pos_cam_cv[:, 0]
                 yolo_pos_cam_ros[:, 2] = -yolo_pos_cam_cv[:, 1]
 
-                object_pos_world_abs = tf_vector(cam_rot_world_ros, yolo_pos_cam_ros) + cam_pos_world_ros
+                object_pos_world_abs = tf_vector(cam_rot_world_ros, yolo_pos_cam_ros) + cam_pos_world_ros_compensated
                 
-                print("*" * 50)
-                print(f"yolo_pose_cam_ros : {yolo_pos_cam_ros}")
-                print(f"YOLO (World Td, NEW): {object_pos_world_abs[0]}") 
-
+                current_sim_box_rot = self._box.data.body_link_quat_w[:, 0, :].clone()
+                new_sim_box_pose = torch.cat([object_pos_world_abs, current_sim_box_rot], dim=-1)
+                
+                self._box.write_root_pose_to_sim(new_sim_box_pose)
                 self.last_known_world_pos = object_pos_world_abs
+                
             else:
                 self.is_object_visible_mask[:] = False
-                robot_action = False
 
-            real_object_grasp_pos = self.last_known_world_pos
-            to_target = real_object_grasp_pos - real_gripper_grasp_pos
+            real_object_grasp_pos = self.last_known_world_pos            
+            to_target = real_object_grasp_pos - self.robot_grasp_pos
 
             object_z_pos = real_object_grasp_pos[:, 2].unsqueeze(-1)
             object_z_vel = torch.zeros_like(object_z_pos)
 
-        else: # 시뮬레이션 모드 (yolo_mode = False)
+        else: 
+            print("self.box_grasp_pos :", self.box_grasp_pos)
             to_target = self.box_grasp_pos - self.robot_grasp_pos
             object_z_pos = self._box.data.body_link_pos_w[:, 0, 2].unsqueeze(-1)
             object_z_vel = self._box.data.body_link_vel_w[:, 0, 2].unsqueeze(-1)
@@ -2190,15 +2508,15 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             (
                 dof_pos_scaled,
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
-                to_target,      # <-- 이제 yolo_mode에 따라 올바른 값이 들어감
-                object_z_pos,   # <-- 이제 yolo_mode에 따라 올바른 값이 들어감
-                object_z_vel,   # <-- 이제 yolo_mode에 따라 올바른 값이 들어감
+                to_target,      # <-- yolo_mode에 따라 올바른 값이 들어감
+                object_z_pos,   # <-- yolo_mode에 따라 올바른 값이 들어감
+                object_z_vel,   # <-- yolo_mode에 따라 올바른 값이 들어감
             ),
             dim=-1,
         )
         
         return {"policy": torch.clamp(obs, -5.0, 5.0),}
-
+    
     def _compute_intermediate_values(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
@@ -2225,17 +2543,158 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             self.box_local_pos[env_ids],
         )
         
+    # def _compute_rewards(
+    #     self,
+    #     actions,
+    #     gripper_to_box_dist,
+    #     franka_grasp_pos, 
+    #     box_pos_w,    
+    #     franka_grasp_rot,
+    #     box_rot_w,
+    #     box_pos_cam,
+    #     box_rot_cam,
+    #     gripper_forward_axis,
+    #     gripper_up_axis,
+    # ):
+    #     # 커리큘럼 기반 가중치 설정 (Reward Scales)s
+    #     levels = self.current_reward_level
+    #     distance_reward_scale = torch.tensor([reward_curriculum_levels[l.item()]["reward_scales"]["distance"] for l in levels], device=self.device)
+    #     vector_align_reward_scale = torch.tensor([reward_curriculum_levels[l.item()]["reward_scales"]["vector_align"] for l in levels], device=self.device)
+    #     position_align_reward_scale = torch.tensor([reward_curriculum_levels[l.item()]["reward_scales"]["position_align"] for l in levels], device=self.device)
+    #     pview_reward_scale = torch.tensor([reward_curriculum_levels[l.item()]["reward_scales"]["pview"] for l in levels], device=self.device)
+    #     joint_penalty_scale = torch.tensor([reward_curriculum_levels[l.item()]["reward_scales"]["joint_penalty"] for l in levels], device=self.device)
+        
+    #     # 커리큘럼 기반 마진 설정
+    #     distance_margin_m = torch.tensor([reward_curriculum_levels[l.item()]["distance_margin"] for l in levels], device=self.device)
+    #     vector_align_margin_rad = torch.tensor([reward_curriculum_levels[l.item()]["vector_align_margin"] for l in levels], device=self.device)
+    #     position_align_margin_m = torch.tensor([reward_curriculum_levels[l.item()]["position_align_margin"] for l in levels], device=self.device)
+    #     pview_margin_m = torch.tensor([reward_curriculum_levels[l.item()]["pview_margin"] for l in levels], device=self.device)
+        
+    #     ALPHA_DIST = 1.0 / (distance_margin_m + 1e-6)
+    #     ALPHA_VEC = 1.0 / (vector_align_margin_rad + 1e-6)
+    #     ALPHA_POS = 1.0 / (position_align_margin_m + 1e-6)
+    #     ALPHA_PVIEW = 1.0 / (pview_margin_m + 1e-6)
+        
+    #     # [핵심 수정] 전 영역 그래디언트 확보를 위한 탈출 기울기 계수 (beta)
+    #     ESCAPE_GRADIENT = 0.005 
+        
+    #     ## R1: 거리 유지 보상 (Distance Reward)
+    #     target_distance = 0.25
+    #     distance_error = torch.abs(gripper_to_box_dist - target_distance)
+    #     distance_reward = (
+    #         torch.exp(-ALPHA_DIST * distance_error) # <--- ALPHA_DIST 동적 적용
+    #         # - ESCAPE_GRADIENT * distance_error
+    #     )
+
+    #     ## R2: 각도 정렬 보상 (Vector Alignment Reward)
+    #     box_pos_local = box_pos_w - self.scene.env_origins
+    #     obj_x, obj_z = box_pos_local[:, 0], box_pos_local[:, 2]
+    #     x_indices = torch.bucketize(obj_x.contiguous(), self.boundaries_x)
+    #     z_indices = torch.bucketize(obj_z.contiguous(), self.boundaries_z)
+    #     gripper_forward = tf_vector(franka_grasp_rot, gripper_forward_axis)
+    #     actual_angle_rad = torch.asin(gripper_forward[:, 2].clamp(-1.0, 1.0))
+    #     target_angle_rad = torch.deg2rad(self.target_angle_matrix[z_indices, x_indices])
+    #     angle_error_rad = torch.abs(actual_angle_rad - target_angle_rad)
+        
+    #     vector_alignment_reward = (
+    #         torch.exp(-ALPHA_VEC * angle_error_rad) # <--- ALPHA_VEC 동적 적용
+    #         # - ESCAPE_GRADIENT * angle_error_rad
+    #     )
+
+    #     ## R3: 그리퍼 위치 유지 보상 (Position Alignment Reward)
+    #     robot_origin = self.scene.env_origins
+    #     grasp_axis = box_pos_w - robot_origin
+    #     grasp_axis[..., 2] = 0.0
+    #     grasp_axis = torch.nn.functional.normalize(grasp_axis, p=2, dim=-1)
+    #     box_to_gripper_vec_xy = franka_grasp_pos - box_pos_w
+    #     box_to_gripper_vec_xy[..., 2] = 0.0
+    #     gripper_proj_dist = torch.norm(torch.cross(box_to_gripper_vec_xy, grasp_axis, dim=-1), dim=-1)
+        
+    #     position_alignment_reward = (
+    #         torch.exp(-ALPHA_POS * gripper_proj_dist) # <--- ALPHA_POS 동적 적용
+    #         # - ESCAPE_GRADIENT * gripper_proj_dist
+    #     )
+                
+    #     ## R4: 시야 유지 보상 (PView Reward)
+    #     # is_in_front_mask = box_pos_cam[:, 0] < 0 
+    #     # center_offset = torch.norm(box_pos_cam[:, [2,1]], dim=-1)
+
+    #     # print("center_offset :", center_offset)
+        
+    #     # # 카메라 중심 오차에 대한 연속 보상 항 (탈출 기울기 적용)
+    #     # pview_positive_reward = (
+    #     #     torch.exp(-ALPHA_PVIEW * center_offset) # <--- ALPHA_PVIEW 동적 적용
+    #     #     #- ESCAPE_GRADIENT * center_offset
+    #     # )
+        
+    #     # # 물체가 카메라 뒤에 있을 때 강제 페널티 (R > 0 유지를 위해 1e-6)
+    #     # pview_reward = torch.where(is_in_front_mask, pview_positive_reward, torch.full_like(center_offset, 1e-6))
+
+    #     is_in_front_mask = box_pos_cam[:, 0] < 0 
+        
+    #     # 1. Depth 추출 (절댓값 사용 및 0 방지)
+    #     depth = torch.abs(box_pos_cam[:, 0]) + 1e-6
+        
+    #     # 2. 물리적 중심 거리 계산 (기존과 동일)
+    #     physical_offset = torch.norm(box_pos_cam[:, [2,1]], dim=-1)
+
+    #     # 3. [핵심 수정] 깊이로 정규화된 오차(View Error) 계산
+    #     # 이것이 곧 "화면 중심에서 얼마나 벗어났는가"를 나타냅니다.
+    #     view_error_ratio = physical_offset / depth
+
+    #     print("view_error_ratio :", view_error_ratio) # 디버깅용
+        
+    #     # 4. 보상 계산
+    #     # ALPHA_PVIEW는 이제 (1.0 / 비율 마진)이 되므로, 
+    #     # 비율 마진이 0.2라면 ALPHA는 5.0이 되어 적절히 작동합니다.
+    #     pview_positive_reward = (
+    #         torch.exp(-ALPHA_PVIEW * view_error_ratio) 
+    #         # - ESCAPE_GRADIENT * view_error_ratio # 필요시 주석 해제
+    #     )
+        
+    #     # 물체가 카메라 뒤에 있을 때 강제 페널티
+    #     pview_reward = torch.where(is_in_front_mask, pview_positive_reward, torch.full_like(view_error_ratio, 1e-6))
+        
+    #     ## P1: 자세 안정성 유지 페널티 (Joint Penalty) - 곱셈 보상과 분리하여 덧셈 페널티로 적용
+    #     joint_deviation = torch.abs(self._robot.data.joint_pos - self.episode_init_joint_pos)
+    #     joint_weights = torch.ones_like(joint_deviation)
+    #     if robot_type == RobotType.UF:
+    #         joint4_idx = self._robot.find_joints(["joint4"])[0]
+    #         joint6_idx = self._robot.find_joints(["joint6"])[0]
+    #         joint_weights[:, joint4_idx] = 0.0
+    #         joint_weights[:, joint6_idx] = 0.0
+    #     weighted_joint_deviation = joint_deviation * joint_weights
+    #     joint_penalty = torch.sum(weighted_joint_deviation, dim=-1)
+    #     joint_penalty = torch.tanh(joint_penalty)
+
+    #     # --- 3. 최종 보상 계산: 순수 곱셈 구조 복원 ---        
+    #     rewards = (
+    #         torch.pow(distance_reward, distance_reward_scale) *
+    #         torch.pow(vector_alignment_reward, vector_align_reward_scale) *
+    #         torch.pow(position_alignment_reward, position_align_reward_scale) * 
+    #         torch.pow(pview_reward, pview_reward_scale)
+    #     )
+        
+    #     self.last_step_reward = rewards.detach()
+        
+    #     # print("*" * 50)
+    #     # print("distance_reward :", distance_reward)
+    #     # print("vector_alignment_reward :", vector_alignment_reward)
+    #     # print("position_alignment_reward :", position_alignment_reward)
+    #     # print("pview_reward :", pview_reward)
+                
+    #     return rewards
+
     def _compute_rewards(
         self,
         actions,
-        gripper_to_box_dist,
-        franka_grasp_pos, 
-        box_pos_w,    
-        franka_grasp_rot,
+        gripper_to_box_dist, # [주의] R1에서 더 이상 사용되지 않음
+        franka_grasp_pos,  # [주의] R3에서 더 이상 사용되지 않음
+        box_pos_w,     # [주의] R2, R3에서 더 이상 사용되지 않음
+        franka_grasp_rot, # [주의] R2에서 더 이상 사용되지 않음
         box_rot_w,
-        box_pos_cam,
-        box_rot_cam,
-        gripper_forward_axis,
+        box_pos_cam,       # [핵심] R1, R3에서 이 변수를 사용
+        gripper_forward_axis, # [주의] R2에서 더 이상 사용되지 않음
         gripper_up_axis,
     ):
         # 커리큘럼 기반 가중치 설정 (Reward Scales)
@@ -2257,72 +2716,103 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         ALPHA_POS = 1.0 / (position_align_margin_m + 1e-6)
         ALPHA_PVIEW = 1.0 / (pview_margin_m + 1e-6)
         
-        # [핵심 수정] 전 영역 그래디언트 확보를 위한 탈출 기울기 계수 (beta)
         ESCAPE_GRADIENT = 0.005 
         
-        ## R1: 거리 유지 보상 (Distance Reward)
+        ## R1: 거리 유지 보상 (Distance Reward) - [카메라 기준 수정]
         target_distance = 0.25
-        distance_error = torch.abs(gripper_to_box_dist - target_distance)
+        camera_forward_distance = box_pos_cam[:, 2]
+        distance_error = torch.abs(camera_forward_distance - target_distance)
+        
         distance_reward = (
-            torch.exp(-ALPHA_DIST * distance_error) # <--- ALPHA_DIST 동적 적용
-            # - ESCAPE_GRADIENT * distance_error
+            torch.exp(-ALPHA_DIST * distance_error)
         )
 
         ## R2: 각도 정렬 보상 (Vector Alignment Reward)
+        # print("box_pos_w :",box_pos_w )
         box_pos_local = box_pos_w - self.scene.env_origins
-        obj_x, obj_z = box_pos_local[:, 0], box_pos_local[:, 2]
-        x_indices = torch.bucketize(obj_x.contiguous(), self.boundaries_x)
-        z_indices = torch.bucketize(obj_z.contiguous(), self.boundaries_z)
-        gripper_forward = tf_vector(franka_grasp_rot, gripper_forward_axis)
-        actual_angle_rad = torch.asin(gripper_forward[:, 2].clamp(-1.0, 1.0))
-        target_angle_rad = torch.deg2rad(self.target_angle_matrix[z_indices, x_indices])
-        angle_error_rad = torch.abs(actual_angle_rad - target_angle_rad)
+        obj_z = box_pos_local[:, 2]
         
-        vector_alignment_reward = (
-            torch.exp(-ALPHA_VEC * angle_error_rad) # <--- ALPHA_VEC 동적 적용
-            # - ESCAPE_GRADIENT * angle_error_rad
-        )
+        q_cam_in_hand = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=self.device).repeat(self.num_envs, 1)
+        
+        deg_bottom = -45.0
+        deg_middle =   0.0
+        deg_top    =  20.0
 
-        ## R3: 그리퍼 위치 유지 보상 (Position Alignment Reward)
-        robot_origin = self.scene.env_origins
-        grasp_axis = box_pos_w - robot_origin
-        grasp_axis[..., 2] = 0.0
-        grasp_axis = torch.nn.functional.normalize(grasp_axis, p=2, dim=-1)
-        box_to_gripper_vec_xy = franka_grasp_pos - box_pos_w
-        box_to_gripper_vec_xy[..., 2] = 0.0
-        gripper_proj_dist = torch.norm(torch.cross(box_to_gripper_vec_xy, grasp_axis, dim=-1), dim=-1)
+        target_angle_deg = torch.full_like(obj_z, deg_middle)
+        target_angle_deg = torch.where(obj_z < 0.30, torch.tensor(deg_bottom, device=self.device), target_angle_deg)
+        target_angle_deg = torch.where(obj_z >= 0.65, torch.tensor(deg_top, device=self.device), target_angle_deg)
+
+        target_angle_rad = torch.deg2rad(target_angle_deg)
+
+        # print("obj_z :", obj_z)
+        # print("target_angle_deg :", target_angle_deg)
+
+        # camera_rot_w = self.quat_mul(franka_grasp_rot, q_cam_in_hand)
+        real_grasp_pos, real_grasp_rot = self.get_real_hand_pose()
+        camera_rot_w = self.quat_mul(real_grasp_rot, q_cam_in_hand)
+
+        camera_forward_axis_local = torch.tensor([0, 0, 1], device=self.device, dtype=torch.float32).repeat(self.num_envs, 1)
+        camera_forward_world = tf_vector(camera_rot_w, camera_forward_axis_local)
+        actual_angle_rad = torch.asin(camera_forward_world[:, 2].clamp(-1.0, 1.0))
         
-        position_alignment_reward = (
-            torch.exp(-ALPHA_POS * gripper_proj_dist) # <--- ALPHA_POS 동적 적용
-            # - ESCAPE_GRADIENT * gripper_proj_dist
+        # print("actual_angle_rad :", torch.rad2deg(actual_angle_rad))
+        angle_error_rad = torch.abs(actual_angle_rad - target_angle_rad)
+        vector_alignment_reward = torch.exp(-ALPHA_VEC * angle_error_rad)
+
+        ## R3: 그리퍼 위치 유지 보상 (Position Alignment Reward) - [카메라 기준 수정]
+        # hand_rot_matrix = kornia.geometry.conversions.quaternion_to_rotation_matrix(franka_grasp_rot)
+        
+        # cam_offset_pos_world = torch.bmm(hand_rot_matrix, cam_offset_pos_local.unsqueeze(-1)).squeeze(-1)
+        # camera_pos_w = franka_grasp_pos + cam_offset_pos_world
+
+        # robot_origin = self.scene.env_origins
+        # grasp_axis = box_pos_w - robot_origin
+        # grasp_axis[..., 2] = 0.0 # 2D 평면(XY)에서의 정렬만 고려
+        # grasp_axis = torch.nn.functional.normalize(grasp_axis, p=2, dim=-1)
+
+        # box_to_cam_vec_xy = camera_pos_w - box_pos_w
+        # box_to_cam_vec_xy[..., 2] = 0.0
+
+        # cam_proj_dist = torch.norm(torch.cross(box_to_cam_vec_xy, grasp_axis, dim=-1), dim=-1)
+        # position_alignment_reward = (
+        #     torch.exp(-ALPHA_POS * cam_proj_dist) # <--- ALPHA_POS 동적 적용
+        #     # - ESCAPE_GRADIENT * cam_proj_dist
+        # )
+        
+        # PView 보상와 동일하게 "카메라 중심 정렬" 보상으로 대체하여
+        # print("box_pos_cam :", box_pos_cam)
+        is_in_front_mask = box_pos_cam[:, 2] > 0 
+        center_offset_r3 = torch.norm(box_pos_cam[:, [0,1]], dim=-1)
+        position_alignment_reward_raw = torch.exp(-ALPHA_POS * center_offset_r3)
+        
+        position_alignment_reward = torch.where(
+            is_in_front_mask, 
+            position_alignment_reward_raw, 
+            torch.tensor(1e-6, device=self.device)
         )
                 
-        ## R4: 시야 유지 보상 (PView Reward)
-        is_in_front_mask = box_pos_cam[:, 0] < 0 
-        center_offset = torch.norm(box_pos_cam[:, [2,1]], dim=-1)
-        
-        # 카메라 중심 오차에 대한 연속 보상 항 (탈출 기울기 적용)
+        ## R4: 시야 유지 보상 (PView Reward) - [수정 없음]
+        depth = torch.abs(box_pos_cam[:, 2]) + 1e-6
+        physical_offset = torch.norm(box_pos_cam[:, [0,1]], dim=-1)
+        view_error_ratio = physical_offset / depth
+
         pview_positive_reward = (
-            torch.exp(-ALPHA_PVIEW * center_offset) # <--- ALPHA_PVIEW 동적 적용
-            #- ESCAPE_GRADIENT * center_offset
+            torch.exp(-ALPHA_PVIEW * view_error_ratio) 
         )
-        
-        # 물체가 카메라 뒤에 있을 때 강제 페널티 (R > 0 유지를 위해 1e-6)
-        pview_reward = torch.where(is_in_front_mask, pview_positive_reward, torch.full_like(center_offset, 1e-6))
+        pview_reward = torch.where(is_in_front_mask, pview_positive_reward, torch.full_like(view_error_ratio, 1e-6))
         
         ## P1: 자세 안정성 유지 페널티 (Joint Penalty) - 곱셈 보상과 분리하여 덧셈 페널티로 적용
-        joint_deviation = torch.abs(self._robot.data.joint_pos - self.episode_init_joint_pos)
-        joint_weights = torch.ones_like(joint_deviation)
-        if robot_type == RobotType.UF:
-            joint4_idx = self._robot.find_joints(["joint4"])[0]
-            joint6_idx = self._robot.find_joints(["joint6"])[0]
-            joint_weights[:, joint4_idx] = 0.0
-            joint_weights[:, joint6_idx] = 0.0
-        weighted_joint_deviation = joint_deviation * joint_weights
-        joint_penalty = torch.sum(weighted_joint_deviation, dim=-1)
-        joint_penalty = torch.tanh(joint_penalty)
+        # joint_deviation = torch.abs(self._robot.data.joint_pos - self.episode_init_joint_pos)
+        # joint_weights = torch.ones_like(joint_deviation)
+        # if robot_type == RobotType.UF:
+        #     joint4_idx = self._robot.find_joints(["joint4"])[0]
+        #     joint6_idx = self._robot.find_joints(["joint6"])[0]
+        #     joint_weights[:, joint4_idx] = 0.0
+        #     joint_weights[:, joint6_idx] = 0.0
+        # weighted_joint_deviation = joint_deviation * joint_weights
+        # joint_penalty = torch.sum(weighted_joint_deviation, dim=-1)
+        # joint_penalty = torch.tanh(joint_penalty)
 
-        # --- 3. 최종 보상 계산: 순수 곱셈 구조 복원 ---        
         rewards = (
             torch.pow(distance_reward, distance_reward_scale) *
             torch.pow(vector_alignment_reward, vector_align_reward_scale) *
@@ -2336,11 +2826,11 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         # print("distance_reward :", distance_reward)
         # print("vector_alignment_reward :", vector_alignment_reward)
         # print("position_alignment_reward :", position_alignment_reward)
+        # print("view_error_ratio :", view_error_ratio)
         # print("pview_reward :", pview_reward)
                 
         return rewards
-    
-    
+     
     def _compute_grasp_transforms(
         self,
         hand_rot,
