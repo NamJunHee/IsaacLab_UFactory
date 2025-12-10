@@ -24,7 +24,7 @@ from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg #, CollisionPropertiesCfg
 from isaaclab.sim.schemas import modify_collision_properties, CollisionPropertiesCfg
 
-from builtin_interfaces.msg import Time
+# from builtin_interfaces.msg import Time
 
 # from PIL import Image
 import cv2
@@ -87,7 +87,7 @@ robot_init_pose = False
 robot_fix = False
 
 UFactory_set_mode = True
-real_robot_move = True
+real_robot_move = False
 yolo_mode = True
 
 foundationpose_mode = False
@@ -436,7 +436,9 @@ class FrankaObjectTrackingEnvCfg(DirectRLEnvCfg):
     episode_length_s = 8.3333  # 500 timesteps
     decimation = 2
     action_space = 6
-    observation_space = 21
+    # observation_space = 21
+    # observation_space = 22
+    observation_space = 23
     state_space = 0
 
     ## simulation
@@ -776,60 +778,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             self.depth_publisher = self.node.create_publisher(Image, '/depth',10)
             
             self.bridge = CvBridge()
-            
-        # if yolo_mode:
-        #     print("[IsaacLab] Initializing YOLO receiver node...")
-        #     self.yolo_msg = None
-        #     self.yolo_pos_raw = None
-
-        #     self.last_valid_yolo_raw = None
-        #     self.last_yolo_time = 0.0
-
-        #     self.yolo_node = rclpy.create_node('yolo_receiver')
-        #     self.yolo_node.create_subscription(
-        #         Point,
-        #         '/yolo/point',
-        #         self.yolo_callback,
-        #         10
-        #     )
-
-        #     # 쓰레드용 공유 변수
-        #     self.real_robot_pose_lock = threading.Lock()
-        #     self.shared_real_hand_pos = None # TCP 위치 (Local)
-        #     self.shared_real_hand_rot = None # TCP 회전
-        #     self.shared_real_joints = None   # 관절 각도 (추가됨)
-        #     self.stop_polling = False
-
-        #     def _polling_worker():
-        #         while not self.stop_polling:
-        #             # 1. 위치(TCP) 물어보기
-        #             code_pos, pose_mm_deg = self.arm.get_position(is_radian=False)
-        #             if code_pos == 0:
-        #                 pos_m = [p / 1000.0 for p in pose_mm_deg[:3]]
-        #                 roll_deg, pitch_deg, yaw_deg = pose_mm_deg[3:]
-        #                 r = scipy.spatial.transform.Rotation.from_euler('xyz', [roll_deg, pitch_deg, yaw_deg], degrees=True)
-        #                 quat_xyzw = r.as_quat()
-        #                 quat_wxyz = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]
-
-        #                 with self.real_robot_pose_lock:
-        #                     # env_origins 없는 Local 좌표로 저장
-        #                     self.shared_real_hand_pos = torch.tensor([pos_m], device=self.device, dtype=torch.float32) 
-        #                     self.shared_real_hand_rot = torch.tensor([quat_wxyz], device=self.device, dtype=torch.float32)
-
-        #             # 2. 관절 각도 물어보기 (독립 수행)
-        #             code_joint, angles = self.arm.get_servo_angle(is_radian=True)
-        #             if code_joint == 0:
-        #                 with self.real_robot_pose_lock:
-        #                     self.shared_real_joints = angles[:6] 
-                    
-        #             # 100Hz 주기
-        #             time.sleep(0.01)
-
-        #     self.poll_thread = threading.Thread(target=_polling_worker, daemon=True)
-        #     self.poll_thread.start()
-        #     print("[IsaacLab] Robot polling thread started!")
         
-
         self.init_cnt = 0
 
         if UFactory_set_mode:
@@ -841,7 +790,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             # self.arm.set_mode(0) ## position Control Mode
             self.arm.set_state(state=0)
 
-            x_max, x_min, y_max, y_min, z_max, z_min = 750, 50, 600, -600, 1000, 50
+            x_max, x_min, y_max, y_min, z_max, z_min = 1200, 50, 600, -600, 1000, 50
             self.arm.set_reduced_tcp_boundary([x_max, x_min, y_max, y_min, z_max, z_min])
             self.arm.set_fense_mode(True)
         
@@ -886,18 +835,28 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         self.prev_box_pos_c = torch.zeros((self.num_envs, 3), device=self.device)
 
         if yolo_mode:
-            print("[IsaacLab] Initializing YOLO receiver node...")
             self.yolo_msg = None
             self.yolo_pos_raw = None
-            
             self.last_valid_yolo_raw = None 
             self.last_yolo_time = 0.0
 
+            self.yolo_fixed_msg = None
+            self.last_valid_yolo_fixed = None
+            self.last_yolo_fixed_time = 0.0
+
             self.yolo_node = rclpy.create_node('yolo_receiver')
+
             self.yolo_node.create_subscription(
                 Point,
                 '/yolo/point',
                 self.yolo_callback,
+                10
+            )
+
+            self.yolo_node.create_subscription(
+                Point,
+                '/yolo/point_world',
+                self.yolo_fixed_callback,
                 10
             )
 
@@ -946,7 +905,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         
     def subscribe_yolo(self):
         msg = self.yolo_msg
-
         self.yolo_msg = None
 
         if msg is None:
@@ -954,9 +912,18 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
         return torch.tensor([msg.x, msg.y, msg.z], device=self.device)
 
+    def subscribe_yolo_fixed(self):
+        msg = self.yolo_fixed_msg
+        self.yolo_fixed_msg = None # 읽으면 초기화 (중복 방지)
+        if msg is None: return None
+        return torch.tensor([msg.x, msg.y, msg.z], device=self.device)
+
     def yolo_callback(self,msg):
         self.yolo_msg = msg
-         
+    
+    def yolo_fixed_callback(self, msg):
+        self.yolo_fixed_msg = msg
+
     def publish_camera_data(self):
         env_id = 0
         
@@ -1391,7 +1358,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
                     angle_cmd = xarm_actions.detach().cpu().numpy().flatten().tolist()
 
-                    ang_speed = 50
+                    ang_speed = 150
                     angmvacc = 30.0
                     rad_speed = math.radians(ang_speed)
                     rad_mvacc = math.radians(angmvacc)
@@ -2113,7 +2080,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                     self._perform_linear_reset(env_ids_level_4_plus)
 
             else: # training_mode == False (테스트 모드)
-                self.action_scale_tensor[env_ids] = 2.0 # (4.0이 적용됨)
+                self.action_scale_tensor[env_ids] = 3.0 # (4.0이 적용됨)
 
                 if object_move == ObjectMoveType.STATIC:
                     self.object_move_state[env_ids] = self.MOVE_STATE_STATIC
@@ -2187,117 +2154,451 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         
     #     # 변수 초기화
     #     box_pos_w_cur = torch.zeros((self.num_envs, 3), device=self.device)
-    #     # box_pos_c_cur는 나중에 계산함
+    #     # box_pos_c_cur는 아래에서 계산됨
 
     #     # ------------------------------------------------------------------
-    #     # [A] YOLO Mode: "물체의 월드 좌표"만 리얼에서 가져옴
+    #     # [A] YOLO Mode (Real Robot & Threading & Alignment)
     #     # ------------------------------------------------------------------
     #     if yolo_mode:
     #         rclpy.spin_once(self.yolo_node, timeout_sec=0.0)
     #         new_yolo_raw = self.subscribe_yolo()
+    #         raw_fixed_cam_world = self.subscribe_yolo_fixed() # 고정 카메라 좌표 (World Frame)
             
-    #         # (타임아웃 로직 생략 - 필요시 기존 코드에서 복사) 
-    #         if new_yolo_raw is not None:
-    #             self.last_valid_yolo_raw = new_yolo_raw
-    #             yolo_cv = new_yolo_raw.repeat(self.num_envs, 1) # (N, 3)
+    #         if self.yolo_msg is not None:
+    #              self.last_yolo_time = self.yolo_msg.header.stamp.sec + self.yolo_msg.header.stamp.nanosec * 1e-9
+            
+    #         current_system_time = time.time()
+    #         if not hasattr(self, 'last_detection_system_time'):
+    #             self.last_detection_system_time = 0.0
 
-    #             # 1. 실제 로봇 위치 가져오기 (가만히 있으므로 고정값)
-    #             #    반드시 env_origins를 더해줘야 글로벌 좌표가 됨
-    #             hand_pos_real_local, hand_rot_real = self.get_real_hand_pose()
+    #         if new_yolo_raw is not None:
+    #             self.last_detection_system_time = current_system_time
+    #             self.last_valid_yolo_raw = new_yolo_raw
+    #             yolo_cv = new_yolo_raw.repeat(self.num_envs, 1)
+
+    #             current_real_pos_local = None 
+    #             current_real_rot = None
                 
-    #             if hand_pos_real_local is None:
-    #                 hand_pos_input = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
+    #             if hasattr(self, 'real_robot_pose_lock'):
+    #                 with self.real_robot_pose_lock:
+    #                     if self.shared_real_hand_pos is not None:
+    #                         current_real_pos_local = self.shared_real_hand_pos.clone()
+    #                         current_real_rot = self.shared_real_hand_rot.clone()
+                
+    #             # 값이 없으면 시뮬레이션 값으로 임시 대체 (초기화 전)
+    #             if current_real_pos_local is None:
+    #                 # Sim은 Global이므로 그대로 사용 (나중에 Local 변환 안 함)
+    #                 hand_pos_input_global = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
     #                 hand_rot_input = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
     #             else:
-    #                 hand_pos_input = hand_pos_real_local.repeat(self.num_envs, 1) + self.scene.env_origins
-    #                 hand_rot_input = hand_rot_real.repeat(self.num_envs, 1)
+    #                 # [핵심] Local -> Global 변환 (각 환경의 원점을 더함)
+    #                 hand_pos_input_global = current_real_pos_local.repeat(self.num_envs, 1) + self.scene.env_origins
+    #                 hand_rot_input = current_real_rot.repeat(self.num_envs, 1)
 
-    #             cam_offset_pos = self.t_cam_to_gripper_local.repeat(self.num_envs, 1)
-    #             q_cam_in_hand = self.R_cam_to_gripper_local.repeat(self.num_envs, 1)
+    #             # ==============================================================
+    #             # [Step 2] 물체 월드 좌표 계산 (Global 유지!)
+    #             # ==============================================================
+    #             # 실제 로봇 캘리브레이션 값 사용
+    #             q_cam_real = self.R_cam_to_gripper_local.repeat(self.num_envs, 1)
+    #             t_cam_real = self.t_cam_to_gripper_local.repeat(self.num_envs, 1)
 
-    #             camera_pos_w_real, camera_rot_w_real = self.compute_camera_world_pose(cam_offset_pos, q_cam_in_hand, hand_pos_input, hand_rot_input)
+    #             # [중요] compute_camera_world_pose 함수를 안 쓰고 직접 계산
+    #             # 이유: 그 함수는 env_origins를 빼버리기 때문. 우리는 Global 좌표가 필요함.
+    #             camera_rot_w_real, camera_pos_w_real_abs = tf_combine(
+    #                 hand_rot_input, hand_pos_input_global, q_cam_real, t_cam_real
+    #             )
                 
-    #             # 3. 좌표 변환 (YOLO -> ROS)
+    #             # YOLO(Z-fwd) -> ROS(X-fwd) 좌표 변환
     #             box_pos_c_ros = torch.zeros_like(yolo_cv)
     #             box_pos_c_ros[:, 0] =  yolo_cv[:, 2] 
     #             box_pos_c_ros[:, 1] = -yolo_cv[:, 0] 
     #             box_pos_c_ros[:, 2] = -yolo_cv[:, 1] 
 
-    #             # 4. 물체의 '진짜' 월드 좌표 확정 (고정값)
-    #             box_pos_w_cur, _ = self.camera_to_world_pose(
-    #                 camera_pos_w_real, camera_rot_w_real, 
+    #             # Global 월드 좌표 확정
+    #             pos_w_from_robot, _ = self.camera_to_world_pose(
+    #                 camera_pos_w_real_abs, camera_rot_w_real, 
     #                 box_pos_c_ros,  
     #                 self.box_grasp_rot 
     #             )
-                
-    #             self.last_known_world_pos = box_pos_w_cur.clone()
-    #             self.is_object_visible_mask[:] = True
+
+    #             pos_w_from_fixed = None
+    #             if raw_fixed_cam_world is not None:
+    #                 # 이미 외부 노드(isaac_yolo11_fixed_camera.py)에서 캘리브레이션 된 월드 좌표를 보냄
+    #                 # 단, 시뮬레이션 환경은 여러 개(env_origins)가 있으므로 현재 환경의 원점을 더해줍니다.
+    #                 pos_w_from_fixed = raw_fixed_cam_world.repeat(self.num_envs, 1) + self.scene.env_origins
+
+    #             final_world_pos = None
+
+    #             if (pos_w_from_robot is not None) and (pos_w_from_fixed is not None):
+    #                 # [Case A] 둘 다 감지됨 -> 50:50 평균
+    #                 # 두 센서의 오차를 상쇄시켜 떨림(Jittering)을 줄이고 정확도를 높입니다.
+    #                 final_world_pos = (pos_w_from_robot * 0.5) + (pos_w_from_fixed * 0.5)
+    #                 self.is_object_visible_mask[:] = True
+
+    #             elif pos_w_from_robot is not None:
+    #                 # [Case B] 로봇 카메라만 감지됨
+    #                 # (예: 물체가 고정 카메라의 사각지대에 있거나 멀리 있을 때)
+    #                 final_world_pos = pos_w_from_robot
+    #                 self.is_object_visible_mask[:] = True
+
+    #             elif pos_w_from_fixed is not None:
+    #                 # [Case C] 고정 카메라만 감지됨
+    #                 # (예: 로봇 팔이 물체를 가려서 핸드 카메라로는 안 보일 때 -> 매우 중요!)
+    #                 final_world_pos = pos_w_from_fixed
+    #                 self.is_object_visible_mask[:] = True
+
+    #             self.last_known_world_pos = final_world_pos.clone()
+    #             # self.is_object_visible_mask[:] = True
             
     #         else:
-    #             # 데이터 없으면 마지막 위치 사용
-    #             if hasattr(self, 'last_known_world_pos'):
-    #                 box_pos_w_cur = self.last_known_world_pos.clone()
+    #             # [데이터 없음] 타임아웃 처리
+    #             time_since_detection = current_system_time - self.last_detection_system_time
+    #             if time_since_detection < 0.5:
+    #                 self.is_object_visible_mask[:] = True 
     #             else:
-    #                 box_pos_w_cur = self._box.data.body_link_pos_w[:, 0, 0:3]
-    #             self.is_object_visible_mask[:] = False
-            
-    #         # 시뮬레이션 물체 위치 업데이트 (Visual)
+    #                 self.is_object_visible_mask[:] = True 
+                
+    #             if hasattr(self, 'last_known_world_pos'):
+    #                 box_pos_w_global = self.last_known_world_pos.clone()
+    #             else:
+    #                 box_pos_w_global = self._box.data.body_link_pos_w[:, 0, 0:3]
+
+    #         # [Step 3] 시각화: 시뮬레이션 물체 이동 (Global 좌표 필수)
+    #         # 이제 box_pos_w_global은 (10.5, 0, 0.5) 같이 제대로 된 월드 좌표임
     #         current_sim_box_rot = self._box.data.body_link_quat_w[:, 0, :].clone()
-    #         new_sim_box_pose = torch.cat([box_pos_w_cur, current_sim_box_rot], dim=-1)
+    #         new_sim_box_pose = torch.cat([box_pos_w_global, current_sim_box_rot], dim=-1)
     #         self._box.write_root_pose_to_sim(new_sim_box_pose)
 
+    #         # [Step 4] 관측값 준비: Global -> Local 변환 (정책 학습용)
+    #         # RL 정책은 보통 env_origins를 뺀 Local 좌표를 학습했음
+    #         box_pos_w_cur = box_pos_w_global - self.scene.env_origins
+
+    #         # ==============================================================
+    #         # [Step 5] 정책 입력용 카메라 좌표 재계산 (Sim Calib 강제 사용)
+    #         # ==============================================================
+    #         # 정책(Policy)은 학습된 'Sim 카메라(Z-Forward)' 기준으로 세상을 봐야 함.
+            
+    #         hand_pos_sim_global = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
+    #         hand_rot_sim = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
+            
+    #         # Sim Mode 값 하드코딩 (Z-Forward 기준)
+    #         sim_offset_pos = torch.tensor([0.07, 0.03, -0.13], device=self.device).repeat(self.num_envs, 1)
+    #         sim_q_cam = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=self.device).repeat(self.num_envs, 1)
+
+    #         # 가상 카메라 위치 계산 (Global)
+    #         # 여기서는 Sim 로봇 위치(Global)를 쓰므로 결과도 Global Camera Pos
+    #         camera_rot_w_sim, camera_pos_w_sim_abs = tf_combine(
+    #             hand_rot_sim, hand_pos_sim_global, sim_q_cam, sim_offset_pos
+    #         )
+            
+    #         # 역변환 (Global World -> Sim Camera Frame)
+    #         # 여기서 box_pos_w_global(Global)을 사용해야 정확히 변환됨
+    #         box_pos_c_cur_calculated, _ = self.world_to_camera_pose(
+    #             camera_pos_w_sim_abs, camera_rot_w_sim,
+    #             box_pos_w_global, 
+    #             self.box_grasp_rot 
+    #         )
+            
+    #         # 최종 Observation 값 (Sim Mode와 좌표축 일치)
+    #         box_pos_c_cur = box_pos_c_cur_calculated[:, 0:3]
+
     #     # ------------------------------------------------------------------
-    #     # [B] Sim Mode: "물체의 월드 좌표"를 시뮬레이션 정답에서 가져옴
+    #     # [B] Sim Mode
     #     # ------------------------------------------------------------------
     #     else:
+    #         # Sim Mode는 Ground Truth에서 바로 Local 좌표 계산
     #         box_pos_w_cur = self._box.data.body_link_pos_w[:, 0, 0:3] - self.scene.env_origins
+            
+    #         # Sim Mode니까 당연히 Sim Calib 사용
+    #         cam_offset_pos = torch.tensor([0.07, 0.03, -0.13], device=self.hand_pos.device).repeat(self.num_envs, 1)
+    #         q_cam_in_hand = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=self.hand_pos.device).repeat(self.num_envs, 1)
 
-    #     # ==================================================================
-    #     # [C] 공통 로직: "움직이는 시뮬레이션 로봇" 기준으로 카메라 좌표 재계산
-    #     # ==================================================================
-    #     # 여기가 핵심입니다! YOLO 모드여도 YOLO Raw 데이터를 쓰지 않고,
-    #     # 위에서 구한 '월드 좌표'를 바탕으로 다시 계산합니다.
-        
-    #     # 1. 현재 움직이고 있는 시뮬레이션 로봇의 손 위치
-    #     hand_pos_sim = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
-    #     hand_rot_sim = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
-        
-    #     cam_offset_pos = torch.tensor([0.07, 0.03, -0.13], device=hand_pos_sim.device).repeat(self.num_envs, 1)
-    #     q_cam_in_hand = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=hand_pos_sim.device).repeat(self.num_envs, 1)
+    #         camera_rot_w, camera_pos_w_abs = tf_combine(
+    #             self.hand_rot, self.hand_pos, q_cam_in_hand, cam_offset_pos
+    #         )
+            
+    #         # Sim Ground Truth World -> Camera Frame
+    #         # 여기서는 compute_camera_world_pose 함수를 안 쓰고 직접 tf_combine 했으므로
+    #         # camera_pos_w_abs는 Global임. 따라서 box_pos_w_cur(Local) + env_origins(Global)를 넣어야 함
+    #         box_pos_w_global_sim = box_pos_w_cur + self.scene.env_origins
 
-    #     camera_pos_w_sim, camera_rot_w_sim = self.compute_camera_world_pose(cam_offset_pos, q_cam_in_hand, hand_pos_sim, hand_rot_sim)
-        
-    #     # 3. 역변환 (World -> Camera Frame)
-    #     box_pos_c_cur_calculated, _ = self.world_to_camera_pose(
-    #         camera_pos_w_sim, camera_rot_w_sim,
-    #         box_pos_w_cur, 
-    #         self.box_grasp_rot 
-    #     )
-    #     box_pos_c_cur = box_pos_c_cur_calculated[:, 0:3]
+    #         box_pos_c_cur_full, _ = self.world_to_camera_pose(
+    #             camera_pos_w_abs, camera_rot_w,
+    #             box_pos_w_global_sim, 
+    #             self.box_grasp_rot
+    #         )
+    #         box_pos_c_cur = box_pos_c_cur_full[:, 0:3]
 
     #     # ------------------------------------------------------------------
-    #     # [D] Observation 구성
+    #     # [C] Observation 구성
     #     # ------------------------------------------------------------------
     #     if torch.sum(self.prev_box_pos_w) == 0:
     #         self.prev_box_pos_w = box_pos_w_cur.clone()
     #         self.prev_box_pos_c = box_pos_c_cur.clone()
 
-    #     print("------------------------------------------------------------------")
-    #     print("camera_pos_w_sim :", camera_pos_w_sim)
-    #     print("camera_rot_w_sim :", camera_rot_w_sim)
-    #     print("box_pos_w_cur : ", box_pos_w_cur)
-    #     print("box_pos_c_cur : ", box_pos_c_cur)
-    
+        
+    #     target_dist = 0.40
+    #     current_depth = box_pos_c_cur[:, 2]
+    #     z_error = (current_depth - target_dist).unsqueeze(-1)
+        
+    #     xy_offset = torch.norm(box_pos_c_cur[:, 0:2], p=2, dim=-1).unsqueeze(-1)
+
+    #     print("box_pos_c_cu:r", box_pos_c_cur)
+    #     print("box_pos_w_cur:r", box_pos_c_cur)
+    #     # print("box_pos_c_cu:r", box_pos_c_cur)
     #     obs = torch.cat(
     #         (
     #             dof_pos_scaled,                                    
     #             self._robot.data.joint_vel * self.cfg.dof_velocity_scale,   
                 
-    #             box_pos_c_cur,           # [중요] 재계산된 카메라 좌표 (Sim/Real 동작 일치)
+    #             box_pos_c_cur,           
     #             # self.prev_box_pos_c,   
                 
-    #             box_pos_w_cur,           # 월드 좌표
+    #             box_pos_w_cur,  # Observation에는 Local 좌표가 들어감
     #             self.prev_box_pos_w,     
+
+    #             z_error,
+    #             xy_offset,
+    #         ),
+    #         dim=-1,
+    #     )
+        
+    #     self.prev_box_pos_w = box_pos_w_cur.clone()
+    #     self.prev_box_pos_c = box_pos_c_cur.clone()
+        
+    #     return {"policy": torch.clamp(obs, -5.0, 5.0),}
+
+    # def _get_observations(self) -> dict:
+    #     # 1. 시뮬레이션 로봇 관절값
+    #     self.current_joint_pos_buffer[:] = self._robot.data.joint_pos
+        
+    #     dof_pos_scaled = (
+    #         2.0
+    #         * (self._robot.data.joint_pos - self.robot_dof_lower_limits)
+    #         / (self.robot_dof_upper_limits - self.robot_dof_lower_limits)
+    #         - 1.0
+    #     )
+        
+    #     box_pos_w_cur = torch.zeros((self.num_envs, 3), device=self.device)
+
+    #     # ------------------------------------------------------------------
+    #     # [A] YOLO Mode (Priority Switch: Robot Cam -> Fixed Cam)
+    #     # ------------------------------------------------------------------
+    #     if yolo_mode:
+    #         rclpy.spin_once(self.yolo_node, timeout_sec=0.0)
+            
+    #         new_yolo_raw = self.subscribe_yolo()          # Robot Cam
+    #         raw_fixed_cam_world = self.subscribe_yolo_fixed() # Fixed Cam
+            
+    #         if self.yolo_msg is not None:
+    #              self.last_yolo_time = self.yolo_msg.header.stamp.sec + self.yolo_msg.header.stamp.nanosec * 1e-9
+            
+    #         current_system_time = time.time()
+    #         if not hasattr(self, 'last_detection_system_time'):
+    #             self.last_detection_system_time = 0.0
+
+    #         # ---------------------------------------------------------
+    #         # [Step 1] Robot Camera World Pos 계산
+    #         # ---------------------------------------------------------
+    #         pos_w_from_robot = None
+            
+    #         if new_yolo_raw is not None:
+    #             self.last_detection_system_time = current_system_time
+    #             self.last_valid_yolo_raw = new_yolo_raw
+    #             yolo_cv = new_yolo_raw.repeat(self.num_envs, 1)
+
+    #             current_real_pos_local = None 
+    #             current_real_rot = None
+                
+    #             if hasattr(self, 'real_robot_pose_lock'):
+    #                 with self.real_robot_pose_lock:
+    #                     if self.shared_real_hand_pos is not None:
+    #                         current_real_pos_local = self.shared_real_hand_pos.clone()
+    #                         current_real_rot = self.shared_real_hand_rot.clone()
+                
+    #             if current_real_pos_local is None:
+    #                 hand_pos_input_global = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
+    #                 hand_rot_input = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
+    #             else:
+    #                 hand_pos_input_global = current_real_pos_local.repeat(self.num_envs, 1) + self.scene.env_origins
+    #                 hand_rot_input = current_real_rot.repeat(self.num_envs, 1)
+
+    #             q_cam_real = self.R_cam_to_gripper_local.repeat(self.num_envs, 1)
+    #             t_cam_real = self.t_cam_to_gripper_local.repeat(self.num_envs, 1)
+
+    #             camera_rot_w_real, camera_pos_w_real_abs = tf_combine(
+    #                 hand_rot_input, hand_pos_input_global, q_cam_real, t_cam_real
+    #             )
+                
+    #             box_pos_c_ros = torch.zeros_like(yolo_cv)
+    #             box_pos_c_ros[:, 0] =  yolo_cv[:, 2] 
+    #             box_pos_c_ros[:, 1] = -yolo_cv[:, 0] 
+    #             box_pos_c_ros[:, 2] = -yolo_cv[:, 1] 
+
+    #             pos_w_from_robot, _ = self.camera_to_world_pose(
+    #                 camera_pos_w_real_abs, camera_rot_w_real, 
+    #                 box_pos_c_ros,  
+    #                 self.box_grasp_rot 
+    #             )
+
+    #         # ---------------------------------------------------------
+    #         # [Step 2] Fixed Camera World Pos 계산
+    #         # ---------------------------------------------------------
+    #         pos_w_from_fixed = None
+    #         if raw_fixed_cam_world is not None:
+    #             # 고정 카메라는 이미 World 좌표계임 (단, Local Base 기준이므로 Global로 변환)
+    #             pos_w_from_fixed = raw_fixed_cam_world.repeat(self.num_envs, 1) + self.scene.env_origins
+    #             # 로봇 카메라가 없을 때만 시간을 갱신하기 위해 여기서는 시간 갱신 로직 뺌 (아래에서 처리)
+            
+    #         # =========================================================
+    #         # [Step 2.5] 두 센서 간 오차(Error) 계산 및 출력
+    #         # =========================================================
+    #         print("pos_w_from_robot :", pos_w_from_robot)
+    #         print("pos_w_from_fixed :", pos_w_from_fixed)
+            
+    #         if (pos_w_from_robot is not None) and (pos_w_from_fixed is not None):
+    #             # 1. 차이 벡터 계산 (Robot - Fixed)
+    #             diff_vec = pos_w_from_robot - pos_w_from_fixed
+                
+    #             # 2. 유클리드 거리 (총 오차)
+    #             diff_dist = torch.norm(diff_vec, p=2, dim=-1)
+                
+    #             # 3. 보기 좋게 cm 단위 변환
+    #             # (batch size가 1인 실제 로봇 상황 가정하여 0번 인덱스만 출력)
+    #             err_cm = diff_dist[0].item() * 100.0
+    #             dx = diff_vec[0, 0].item() * 100.0
+    #             dy = diff_vec[0, 1].item() * 100.0
+    #             dz = diff_vec[0, 2].item() * 100.0
+                
+    #             # 터미널 한 줄 출력 (\r 사용)
+    #             print(f"[Error Check] Dist: {err_cm:.2f}cm (X:{dx:.1f}, Y:{dy:.1f}, Z:{dz:.1f})   ", end="")
+
+    #         # ---------------------------------------------------------
+    #         # [Step 3] Priority Selection (핵심 수정됨)
+    #         # ---------------------------------------------------------
+    #         target_pos_raw = None
+
+    #         if pos_w_from_robot is not None:
+    #             # [Priority 1] 로봇 카메라가 보이면 무조건 이거 씀
+    #             target_pos_raw = pos_w_from_robot
+    #             self.is_object_visible_mask[:] = True
+                
+    #         elif pos_w_from_fixed is not None:
+    #             # [Priority 2] 로봇 카메라가 안 보이고(None), 고정 카메라만 보일 때
+    #             target_pos_raw = pos_w_from_fixed
+    #             self.is_object_visible_mask[:] = True
+    #             self.last_detection_system_time = current_system_time # 고정 카메라로 연명 중일 때 시간 갱신
+
+    #         else:
+    #             # [Priority 3] 둘 다 안 보임 -> 타임아웃 & 마지막 위치 유지
+    #             time_since_detection = current_system_time - self.last_detection_system_time
+                
+    #             if hasattr(self, 'last_known_world_pos'):
+    #                 target_pos_raw = self.last_known_world_pos.clone()
+    #             else:
+    #                 target_pos_raw = self._box.data.body_link_pos_w[:, 0, 0:3]
+
+    #             if time_since_detection > 0.5:
+    #                 self.is_object_visible_mask[:] = False 
+    #             else:
+    #                 self.is_object_visible_mask[:] = True 
+
+    #         # ---------------------------------------------------------
+    #         # [Step 4] Smoothing (Optional) - 떨림 방지용 필터는 유지 권장
+    #         # ---------------------------------------------------------
+    #         ALPHA = 0.5 # 0.5 정도로 설정 (반응성 50%, 기존값 50%)
+            
+    #         if not hasattr(self, 'filtered_pos_w'):
+    #             self.filtered_pos_w = target_pos_raw.clone()
+            
+    #         # 카메라가 바뀌거나 위치가 확 튀면 필터 리셋 (Jump Detection)
+    #         dist_jump = torch.norm(target_pos_raw - self.filtered_pos_w, dim=-1)
+    #         jump_mask = dist_jump > 0.1 # 10cm 이상 차이나면 필터 무시하고 즉시 이동
+            
+    #         self.filtered_pos_w = (target_pos_raw * ALPHA) + (self.filtered_pos_w * (1.0 - ALPHA))
+            
+    #         if torch.any(jump_mask):
+    #             self.filtered_pos_w[jump_mask] = target_pos_raw[jump_mask]
+
+    #         final_world_pos = self.filtered_pos_w.clone()
+            
+    #         self.last_known_world_pos = final_world_pos.clone()
+    #         box_pos_w_global = final_world_pos.clone()
+
+    #         # [Step 5] 시각화 (Sync)
+    #         current_sim_box_rot = self._box.data.body_link_quat_w[:, 0, :].clone()
+    #         new_sim_box_pose = torch.cat([box_pos_w_global, current_sim_box_rot], dim=-1)
+    #         self._box.write_root_pose_to_sim(new_sim_box_pose)
+
+    #         # [Step 6] Local 변환
+    #         box_pos_w_cur = box_pos_w_global - self.scene.env_origins
+
+    #         # [Step 7] Sim Camera Frame 변환
+    #         hand_pos_sim_global = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
+    #         hand_rot_sim = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
+            
+    #         sim_offset_pos = torch.tensor([0.07, 0.03, -0.13], device=self.device).repeat(self.num_envs, 1)
+    #         sim_q_cam = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=self.device).repeat(self.num_envs, 1)
+
+    #         camera_rot_w_sim, camera_pos_w_sim_abs = tf_combine(
+    #             hand_rot_sim, hand_pos_sim_global, sim_q_cam, sim_offset_pos
+    #         )
+            
+    #         box_pos_c_cur_calculated, _ = self.world_to_camera_pose(
+    #             camera_pos_w_sim_abs, camera_rot_w_sim,
+    #             box_pos_w_global, 
+    #             self.box_grasp_rot 
+    #         )
+            
+    #         box_pos_c_cur = box_pos_c_cur_calculated[:, 0:3]
+
+    #     # ------------------------------------------------------------------
+    #     # [B] Sim Mode
+    #     # ------------------------------------------------------------------
+    #     else:
+    #         box_pos_w_cur = self._box.data.body_link_pos_w[:, 0, 0:3] - self.scene.env_origins
+            
+    #         cam_offset_pos = torch.tensor([0.07, 0.03, -0.13], device=self.hand_pos.device).repeat(self.num_envs, 1)
+    #         q_cam_in_hand = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=self.hand_pos.device).repeat(self.num_envs, 1)
+
+    #         camera_rot_w, camera_pos_w_abs = tf_combine(
+    #             self.hand_rot, self.hand_pos, q_cam_in_hand, cam_offset_pos
+    #         )
+            
+    #         box_pos_w_global_sim = box_pos_w_cur + self.scene.env_origins
+
+    #         box_pos_c_cur_full, _ = self.world_to_camera_pose(
+    #             camera_pos_w_abs, camera_rot_w,
+    #             box_pos_w_global_sim, 
+    #             self.box_grasp_rot
+    #         )
+    #         box_pos_c_cur = box_pos_c_cur_full[:, 0:3]
+
+    #     # ------------------------------------------------------------------
+    #     # [C] Observation 구성
+    #     # ------------------------------------------------------------------
+    #     if torch.sum(self.prev_box_pos_w) == 0:
+    #         self.prev_box_pos_w = box_pos_w_cur.clone()
+    #         self.prev_box_pos_c = box_pos_c_cur.clone()
+    #         if yolo_mode:
+    #             self.filtered_pos_w = (box_pos_w_cur + self.scene.env_origins).clone()
+
+    #     target_dist = 0.40
+    #     current_depth = box_pos_c_cur[:, 2]
+    #     z_error = (current_depth - target_dist).unsqueeze(-1)
+    #     xy_offset = torch.norm(box_pos_c_cur[:, 0:2], p=2, dim=-1).unsqueeze(-1)
+
+    #     obs = torch.cat(
+    #         (
+    #             dof_pos_scaled,                                    
+    #             self._robot.data.joint_vel * self.cfg.dof_velocity_scale,   
+                
+    #             box_pos_c_cur,           
+    #             box_pos_w_cur,
+    #             self.prev_box_pos_w,     
+
+    #             z_error,
+    #             xy_offset,
     #         ),
     #         dim=-1,
     #     )
@@ -2308,7 +2609,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
     #     return {"policy": torch.clamp(obs, -5.0, 5.0),}
 
     def _get_observations(self) -> dict:
-        # 1. 시뮬레이션 로봇 관절값 (항상 변함)
+        # 1. 시뮬레이션 로봇 관절값
         self.current_joint_pos_buffer[:] = self._robot.data.joint_pos
         
         dof_pos_scaled = (
@@ -2318,16 +2619,16 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             - 1.0
         )
         
-        # 변수 초기화
         box_pos_w_cur = torch.zeros((self.num_envs, 3), device=self.device)
-        # box_pos_c_cur는 아래에서 계산됨
 
         # ------------------------------------------------------------------
-        # [A] YOLO Mode (Real Robot & Threading & Alignment)
+        # [A] YOLO Mode (Priority Switch + Error Check with Caching)
         # ------------------------------------------------------------------
         if yolo_mode:
             rclpy.spin_once(self.yolo_node, timeout_sec=0.0)
-            new_yolo_raw = self.subscribe_yolo()
+            
+            new_yolo_raw = self.subscribe_yolo()          # Robot Cam
+            raw_fixed_cam_world = self.subscribe_yolo_fixed() # Fixed Cam
             
             if self.yolo_msg is not None:
                  self.last_yolo_time = self.yolo_msg.header.stamp.sec + self.yolo_msg.header.stamp.nanosec * 1e-9
@@ -2336,14 +2637,24 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             if not hasattr(self, 'last_detection_system_time'):
                 self.last_detection_system_time = 0.0
 
+            # [캐싱 변수 초기화] 클래스 멤버변수로 선언되지 않았을 경우를 대비
+            if not hasattr(self, 'cache_pos_robot'):
+                self.cache_pos_robot = None
+            if not hasattr(self, 'cache_pos_fixed'):
+                self.cache_pos_fixed = None
+
+            # ---------------------------------------------------------
+            # [Step 1] Robot Camera World Pos 계산
+            # ---------------------------------------------------------
+            pos_w_from_robot = None
+            dist_from_hand = 10.0 
+
             if new_yolo_raw is not None:
                 self.last_detection_system_time = current_system_time
                 self.last_valid_yolo_raw = new_yolo_raw
                 yolo_cv = new_yolo_raw.repeat(self.num_envs, 1)
+                dist_from_hand = yolo_cv[0, 2].item() 
 
-                # ==============================================================
-                # [Step 1] 쓰레드에서 로봇 위치 읽기 (Non-blocking)
-                # ==============================================================
                 current_real_pos_local = None 
                 current_real_rot = None
                 
@@ -2353,117 +2664,151 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                             current_real_pos_local = self.shared_real_hand_pos.clone()
                             current_real_rot = self.shared_real_hand_rot.clone()
                 
-                # 값이 없으면 시뮬레이션 값으로 임시 대체 (초기화 전)
                 if current_real_pos_local is None:
-                    # Sim은 Global이므로 그대로 사용 (나중에 Local 변환 안 함)
                     hand_pos_input_global = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
                     hand_rot_input = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
                 else:
-                    # [핵심] Local -> Global 변환 (각 환경의 원점을 더함)
                     hand_pos_input_global = current_real_pos_local.repeat(self.num_envs, 1) + self.scene.env_origins
                     hand_rot_input = current_real_rot.repeat(self.num_envs, 1)
 
-                # ==============================================================
-                # [Step 2] 물체 월드 좌표 계산 (Global 유지!)
-                # ==============================================================
-                # 실제 로봇 캘리브레이션 값 사용
                 q_cam_real = self.R_cam_to_gripper_local.repeat(self.num_envs, 1)
                 t_cam_real = self.t_cam_to_gripper_local.repeat(self.num_envs, 1)
 
-                # [중요] compute_camera_world_pose 함수를 안 쓰고 직접 계산
-                # 이유: 그 함수는 env_origins를 빼버리기 때문. 우리는 Global 좌표가 필요함.
                 camera_rot_w_real, camera_pos_w_real_abs = tf_combine(
                     hand_rot_input, hand_pos_input_global, q_cam_real, t_cam_real
                 )
                 
-                # YOLO(Z-fwd) -> ROS(X-fwd) 좌표 변환
                 box_pos_c_ros = torch.zeros_like(yolo_cv)
                 box_pos_c_ros[:, 0] =  yolo_cv[:, 2] 
                 box_pos_c_ros[:, 1] = -yolo_cv[:, 0] 
                 box_pos_c_ros[:, 2] = -yolo_cv[:, 1] 
 
-                # Global 월드 좌표 확정
-                box_pos_w_global, _ = self.camera_to_world_pose(
+                pos_w_from_robot, _ = self.camera_to_world_pose(
                     camera_pos_w_real_abs, camera_rot_w_real, 
                     box_pos_c_ros,  
                     self.box_grasp_rot 
                 )
                 
-                self.last_known_world_pos = box_pos_w_global.clone()
-                self.is_object_visible_mask[:] = True
-            
-            else:
-                # [데이터 없음] 타임아웃 처리
-                time_since_detection = current_system_time - self.last_detection_system_time
-                if time_since_detection < 0.5:
-                    self.is_object_visible_mask[:] = True 
-                else:
-                    self.is_object_visible_mask[:] = True 
-                
-                if hasattr(self, 'last_known_world_pos'):
-                    box_pos_w_global = self.last_known_world_pos.clone()
-                else:
-                    box_pos_w_global = self._box.data.body_link_pos_w[:, 0, 0:3]
+                # [중요] 최신 값 캐싱
+                self.cache_pos_robot = pos_w_from_robot.clone()
 
-            # [Step 3] 시각화: 시뮬레이션 물체 이동 (Global 좌표 필수)
-            # 이제 box_pos_w_global은 (10.5, 0, 0.5) 같이 제대로 된 월드 좌표임
+            # ---------------------------------------------------------
+            # [Step 2] Fixed Camera World Pos 계산
+            # ---------------------------------------------------------
+            pos_w_from_fixed = None
+            if raw_fixed_cam_world is not None:
+                if pos_w_from_robot is None:
+                    self.last_detection_system_time = current_system_time
+                    
+                pos_w_from_fixed = raw_fixed_cam_world.repeat(self.num_envs, 1) + self.scene.env_origins
+                
+                # [중요] 최신 값 캐싱
+                self.cache_pos_fixed = pos_w_from_fixed.clone()
+
+            # =========================================================
+            # [Step 2.5] 오차 계산 (캐시된 값 사용)
+            # =========================================================
+            # 현재 프레임에 데이터가 없더라도, 가장 최근 데이터를 가져와서 비교함
+            if (self.cache_pos_robot is not None) and (self.cache_pos_fixed is not None):
+                diff_vec = self.cache_pos_robot - self.cache_pos_fixed
+                diff_dist = torch.norm(diff_vec, p=2, dim=-1)
+                
+                err_cm = diff_dist[0].item() * 100.0
+                dx = diff_vec[0, 0].item() * 100.0
+                dy = diff_vec[0, 1].item() * 100.0
+                dz = diff_vec[0, 2].item() * 100.0
+                
+                # [수정] \r을 제거하고 일반 print 사용 (확실히 보기 위함)
+                # 너무 자주 출력되면 보기 힘드니, 데이터가 갱신될 때만 출력되게 하거나
+                # 일단은 매번 출력해서 확인
+                if new_yolo_raw is not None or raw_fixed_cam_world is not None:
+                     print(f"[Error Check] Dist: {err_cm:5.2f} cm | X:{dx:5.1f} Y:{dy:5.1f} Z:{dz:5.1f}")
+
+            # ---------------------------------------------------------
+            # [Step 3] Priority Selection (코드 동일)
+            # ---------------------------------------------------------
+            target_pos_raw = None
+            is_robot_cam_reliable = (pos_w_from_robot is not None) and (dist_from_hand > 0.15)
+
+            if is_robot_cam_reliable:
+                target_pos_raw = pos_w_from_robot
+                self.is_object_visible_mask[:] = True
+                
+            elif pos_w_from_fixed is not None:
+                target_pos_raw = pos_w_from_fixed
+                self.is_object_visible_mask[:] = True
+
+            else:
+                if pos_w_from_robot is not None:
+                     target_pos_raw = pos_w_from_robot
+                     self.is_object_visible_mask[:] = True
+                else:
+                    time_since_detection = current_system_time - self.last_detection_system_time
+                    if hasattr(self, 'last_known_world_pos'):
+                        target_pos_raw = self.last_known_world_pos.clone()
+                    else:
+                        target_pos_raw = self._box.data.body_link_pos_w[:, 0, 0:3]
+
+                    if time_since_detection > 0.5:
+                        self.is_object_visible_mask[:] = False 
+                    else:
+                        self.is_object_visible_mask[:] = True 
+            
+            # ---------------------------------------------------------
+            # [Step 4] Smoothing Filter
+            # ---------------------------------------------------------
+            if not hasattr(self, 'filtered_pos_w'):
+                self.filtered_pos_w = target_pos_raw.clone()
+            
+            dist_jump = torch.norm(target_pos_raw - self.filtered_pos_w, dim=-1)
+            jump_mask = dist_jump > 0.1 
+            
+            ALPHA = 0.5 
+            self.filtered_pos_w = (target_pos_raw * ALPHA) + (self.filtered_pos_w * (1.0 - ALPHA))
+            
+            if torch.any(jump_mask):
+                self.filtered_pos_w[jump_mask] = target_pos_raw[jump_mask]
+
+            final_world_pos = self.filtered_pos_w.clone()
+            self.last_known_world_pos = final_world_pos.clone()
+            box_pos_w_global = final_world_pos.clone()
+
+            # [Step 5 ~ 7] (기존 코드 동일)
             current_sim_box_rot = self._box.data.body_link_quat_w[:, 0, :].clone()
             new_sim_box_pose = torch.cat([box_pos_w_global, current_sim_box_rot], dim=-1)
             self._box.write_root_pose_to_sim(new_sim_box_pose)
 
-            # [Step 4] 관측값 준비: Global -> Local 변환 (정책 학습용)
-            # RL 정책은 보통 env_origins를 뺀 Local 좌표를 학습했음
             box_pos_w_cur = box_pos_w_global - self.scene.env_origins
 
-            # ==============================================================
-            # [Step 5] 정책 입력용 카메라 좌표 재계산 (Sim Calib 강제 사용)
-            # ==============================================================
-            # 정책(Policy)은 학습된 'Sim 카메라(Z-Forward)' 기준으로 세상을 봐야 함.
-            
             hand_pos_sim_global = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
             hand_rot_sim = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
-            
-            # Sim Mode 값 하드코딩 (Z-Forward 기준)
             sim_offset_pos = torch.tensor([0.07, 0.03, -0.13], device=self.device).repeat(self.num_envs, 1)
             sim_q_cam = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=self.device).repeat(self.num_envs, 1)
 
-            # 가상 카메라 위치 계산 (Global)
-            # 여기서는 Sim 로봇 위치(Global)를 쓰므로 결과도 Global Camera Pos
             camera_rot_w_sim, camera_pos_w_sim_abs = tf_combine(
                 hand_rot_sim, hand_pos_sim_global, sim_q_cam, sim_offset_pos
             )
             
-            # 역변환 (Global World -> Sim Camera Frame)
-            # 여기서 box_pos_w_global(Global)을 사용해야 정확히 변환됨
             box_pos_c_cur_calculated, _ = self.world_to_camera_pose(
                 camera_pos_w_sim_abs, camera_rot_w_sim,
                 box_pos_w_global, 
                 self.box_grasp_rot 
             )
-            
-            # 최종 Observation 값 (Sim Mode와 좌표축 일치)
             box_pos_c_cur = box_pos_c_cur_calculated[:, 0:3]
 
         # ------------------------------------------------------------------
         # [B] Sim Mode
         # ------------------------------------------------------------------
         else:
-            # Sim Mode는 Ground Truth에서 바로 Local 좌표 계산
             box_pos_w_cur = self._box.data.body_link_pos_w[:, 0, 0:3] - self.scene.env_origins
             
-            # Sim Mode니까 당연히 Sim Calib 사용
             cam_offset_pos = torch.tensor([0.07, 0.03, -0.13], device=self.hand_pos.device).repeat(self.num_envs, 1)
             q_cam_in_hand = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=self.hand_pos.device).repeat(self.num_envs, 1)
 
             camera_rot_w, camera_pos_w_abs = tf_combine(
                 self.hand_rot, self.hand_pos, q_cam_in_hand, cam_offset_pos
             )
-            
-            # Sim Ground Truth World -> Camera Frame
-            # 여기서는 compute_camera_world_pose 함수를 안 쓰고 직접 tf_combine 했으므로
-            # camera_pos_w_abs는 Global임. 따라서 box_pos_w_cur(Local) + env_origins(Global)를 넣어야 함
             box_pos_w_global_sim = box_pos_w_cur + self.scene.env_origins
-
             box_pos_c_cur_full, _ = self.world_to_camera_pose(
                 camera_pos_w_abs, camera_rot_w,
                 box_pos_w_global_sim, 
@@ -2471,23 +2816,29 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             )
             box_pos_c_cur = box_pos_c_cur_full[:, 0:3]
 
-        # ------------------------------------------------------------------
-        # [C] Observation 구성
-        # ------------------------------------------------------------------
+        # [C] Observation 구성 (동일)
         if torch.sum(self.prev_box_pos_w) == 0:
             self.prev_box_pos_w = box_pos_w_cur.clone()
             self.prev_box_pos_c = box_pos_c_cur.clone()
-    
+            if yolo_mode:
+                self.filtered_pos_w = (box_pos_w_cur + self.scene.env_origins).clone()
+
+        target_dist = 0.40
+        current_depth = box_pos_c_cur[:, 2]
+        z_error = (current_depth - target_dist).unsqueeze(-1)
+        xy_offset = torch.norm(box_pos_c_cur[:, 0:2], p=2, dim=-1).unsqueeze(-1)
+
         obs = torch.cat(
             (
                 dof_pos_scaled,                                    
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,   
                 
                 box_pos_c_cur,           
-                # self.prev_box_pos_c,   
-                
-                box_pos_w_cur,  # Observation에는 Local 좌표가 들어감
+                box_pos_w_cur,
                 self.prev_box_pos_w,     
+
+                z_error,
+                xy_offset,
             ),
             dim=-1,
         )
