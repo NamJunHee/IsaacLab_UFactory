@@ -1550,35 +1550,13 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         self._compute_intermediate_values()
         
         if yolo_mode: 
-            # hand_pos_real, hand_rot_real = self.get_real_hand_pose()
-            
-            # if hand_pos_real is None:
-            #     hand_pos_input = self._robot.data.body_link_pos_w[:, self.hand_link_idx]
-            #     hand_rot_input = self._robot.data.body_link_quat_w[:, self.hand_link_idx]
-            # else:
-            #     hand_pos_input = hand_pos_real.repeat(self.num_envs, 1)
-            #     hand_rot_input = hand_rot_real.repeat(self.num_envs, 1)
-            
-            # sim_gripper_grasp_pos = self.robot_grasp_pos
-            # sim_gripper_grasp_rot = self.robot_grasp_rot
-            
-            # camera_pos_w, camera_rot_w = self.compute_camera_world_pose(hand_pos_input, hand_rot_input)
-            
             real_object_grasp_pos = self.last_known_world_pos
             real_object_grasp_rot = self.box_grasp_rot 
-
-            # dist_input = torch.norm(sim_gripper_grasp_pos - real_object_grasp_pos, p=2, dim=-1)
-            # dist_input = torch.norm(hand_pos_input - real_object_grasp_pos, p=2, dim=-1)
-            
-            # gripper_grasp_pos_input = hand_pos_input
-            # gripper_grasp_rot_input = hand_rot_input
 
             object_grasp_pos_input = real_object_grasp_pos
             object_grasp_rot_input = real_object_grasp_rot
 
             box_rot_cam_input = object_grasp_rot_input
-
-            # real_object_pos_local = real_object_grasp_pos - self.scene.env_origins
             
             if self.yolo_pos_raw is not None:
                 yolo_pos_cv = self.yolo_pos_raw.repeat(self.num_envs, 1)
@@ -2163,15 +2141,12 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 # [신규] Level 4: (Moving Random, Robot Speed 1.5) - 최종
                 if len(env_ids_level_4_plus) > 0:
                     self.object_move_state[env_ids_level_4_plus] = self.MOVE_STATE_LINEAR
-                    # num_level_4_plus = len(env_ids_level_4_plus)
-                    # random_speeds = torch.rand(num_level_4_plus, device=self.device) * (0.0015 - 0.0007) + 0.0007
-                    # self.obj_speed[env_ids_level_4_plus] = random_speeds
                     self.obj_speed[env_ids_level_4_plus] = 0.15
                     self.action_scale_tensor[env_ids_level_4_plus] = 1.0 # 로봇 속도 증가
                     self._perform_linear_reset(env_ids_level_4_plus)
 
             else: # training_mode == False (테스트 모드)
-                self.action_scale_tensor[env_ids] = 3.0 # (4.0이 적용됨)
+                self.action_scale_tensor[env_ids] = 5.0 # (4.0이 적용됨)
 
                 if object_move == ObjectMoveType.STATIC:
                     self.object_move_state[env_ids] = self.MOVE_STATE_STATIC
@@ -2986,7 +2961,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 if self.shared_yolo_robot is not None:
                     new_yolo_raw = self.shared_yolo_robot.clone()
                     last_msg_time = getattr(self, 'shared_yolo_robot_time', 0.0)
-                    
+
                 if self.shared_yolo_fixed is not None:
                     raw_fixed_cam_world = self.shared_yolo_fixed.clone()
             
