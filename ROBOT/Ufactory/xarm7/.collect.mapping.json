@@ -1,0 +1,29 @@
+{
+    "version": "1.0",
+    "file_records": [
+        {
+            "source_url": "/data/jeff/customer/ufactory/ufactory_usd_urdf_mesh_20250421/ufactory_usd_urdf_mesh/group1_regular_gripper/xarm7/xarm7/xarm7.usd",
+            "source_hash": "235b810d3a00668a4f8077a01c38e9d4a00fac3c",
+            "target_url": "./xarm7.usd",
+            "target_hash": "d2967d539a46befb50187a7e823d38b453702371"
+        },
+        {
+            "source_url": "/data/jeff/customer/ufactory/ufactory_usd_urdf_mesh_20250421/ufactory_usd_urdf_mesh/group1_regular_gripper/xarm7/xarm7/configuration/xarm7_base.usd",
+            "source_hash": "4f6f9c371657f7a23a81f0481a3d90b493dacc0c",
+            "target_url": "./configuration/xarm7_base.usd",
+            "target_hash": "929308fed62e3548ae86c8433b2f0101bc0959af"
+        },
+        {
+            "source_url": "/data/jeff/customer/ufactory/ufactory_usd_urdf_mesh_20250421/ufactory_usd_urdf_mesh/group1_regular_gripper/xarm7/xarm7/configuration/xarm7_physics.usd",
+            "source_hash": "62a95197a35e8a368d6ab1702a1f5bf2640c1b22",
+            "target_url": "./configuration/xarm7_physics.usd",
+            "target_hash": "d54a7a5abd03654714f132450c9b999a02c7ede4"
+        },
+        {
+            "source_url": "/data/jeff/customer/ufactory/ufactory_usd_urdf_mesh_20250421/ufactory_usd_urdf_mesh/group1_regular_gripper/xarm7/xarm7/configuration/xarm7_sensor.usd",
+            "source_hash": "f637da49388eb85467f645b7c5cd77c080dbd15a",
+            "target_url": "./configuration/xarm7_sensor.usd",
+            "target_hash": "014063a8665a52835d7397764ff71d6d244da478"
+        }
+    ]
+}

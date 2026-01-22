@@ -23,6 +23,7 @@ from isaaclab.assets import RigidObjectCfg, RigidObject
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg #, CollisionPropertiesCfg
 from isaaclab.sim.schemas import modify_collision_properties, CollisionPropertiesCfg
+from isaaclab.sensors import CameraCfg, Camera, ContactSensor, ContactSensorCfg # [수정] ContactSensor, ContactSensorCfg 추가
 
 # from builtin_interfaces.msg import Time
 
@@ -79,7 +80,7 @@ object_move = ObjectMoveType.LINEAR
 
 training_mode = False
 
-camera_enable = True
+camera_enable = False
 image_publish = False
 
 robot_action = False
@@ -87,13 +88,17 @@ robot_init_pose = False
 robot_fix = False
 
 UFactory_set_mode = True
-real_robot_move = True
+real_robot_move = False
 yolo_mode = True
+
+grasping_mode = False
 
 foundationpose_mode = False
 
 init_reward = True
 reset_flag = True
+
+fixed_camera_enable = False
 
 add_episode_length = 200
 # add_episode_length = -800
@@ -477,7 +482,8 @@ class FrankaObjectTrackingEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/xarm6",
         spawn=sim_utils.UsdFileCfg(
             # usd_path="/home/nmail-njh/NMAIL/01_Project/Robot_Grasping/IsaacLab/ROBOT/xarm6_robot_white/xarm6_robot_white.usd",
-            usd_path="/home/nmail-robot/IsaacLab/ROBOT/xarm6_robot_white/xarm6_robot_white.usd",
+            # usd_path="/home/nmail-robot/IsaacLab/ROBOT/xarm6_robot_white/xarm6_robot_white.usd",
+            usd_path="/home/nmail-robot/IsaacLab/ROBOT/Ufactory/xarm6/xarm6.usd",
 
             activate_contact_sensors=False,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -485,7 +491,7 @@ class FrankaObjectTrackingEnvCfg(DirectRLEnvCfg):
                 max_depenetration_velocity=5.0,
             ),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=True, solver_position_iteration_count=24, solver_velocity_iteration_count=1
+                enabled_self_collisions=False, solver_position_iteration_count=24, solver_velocity_iteration_count=1
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
@@ -498,26 +504,50 @@ class FrankaObjectTrackingEnvCfg(DirectRLEnvCfg):
                 joint_names_expr=["joint1", "joint2", "joint3"],
                 effort_limit = 87.0,
                 
-                velocity_limit = 2.61,
+                # velocity_limit = 2.61,
+                velocity_limit = 3.5,
                 stiffness = 2000.0,
                 damping = 100.0,
             ),
             "ufactory_forearm": ImplicitActuatorCfg(
-                joint_names_expr=["joint4", "joint5", "joint6"],
+                joint_names_expr=["joint4", "joint5"],
                 effort_limit = 87.0,
                 
-                velocity_limit = 2.61,
+                # velocity_limit = 2.61,
+                velocity_limit = 3.5,
                 stiffness = 2000.0,
                 damping = 100.0,
             ),
+            "ufactory_wrist": ImplicitActuatorCfg(
+                joint_names_expr=["joint6"],
+                effort_limit = 87.0,
+                velocity_limit = 5.0, # 회전 속도 한계 품
+                stiffness = 400.0,    # [핵심] 2000 -> 500 (유연하게 만듦)
+                damping = 40.0,       # 댐핑 조절
+            ),
+            "ufactory_hand": ImplicitActuatorCfg(
+                # xArm6 그리퍼의 메인 관절 이름이 "drive_joint" 입니다.
+                joint_names_expr=[".*drive_joint"], 
+                effort_limit=100.0,   # 충분한 힘
+                velocity_limit=2.0,   # 적절한 속도
+                stiffness=5000.0,     # [중요] 위치 고정을 위해 높은 강성(Stiffness) 필요
+                damping=100.0,        # 진동 방지
+            ),
         },
+    )
+
+    contact_forces = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/xarm6/gripper/.*(finger|knuckle|base_link)",
+        update_period=0.0, 
+        history_length=6, 
+        debug_vis=True
     )
 
     ## camera
     if camera_enable:
         camera = CameraCfg(
             # prim_path="/World/envs/env_.*/xarm6_with_gripper/link6/hand_camera",
-            prim_path="/World/envs/env_.*/xarm6/link6/hand_camera",
+            prim_path="/World/envs/env_.*/xarm6/link5/hand_camera",
             update_period=0.03,
             height=480,
             width=640,
@@ -919,11 +949,24 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                     else:
                         print(f"[Thread Error] get_servo_angle failed! code: {code_joint}")
                     
-                    time.sleep(0.01)
+                    # time.sleep(0.01)
+                    time.sleep(0.05)
 
             self.poll_thread = threading.Thread(target=_polling_worker, daemon=True)
             self.poll_thread.start()
             print("[IsaacLab] Robot polling thread started!")
+        
+        # [추가] Grasping 상태 관리 플래그
+        self.is_grasping = False       # 현재 잡기 동작 수행 중인지 여부
+        self.grasp_done = False        # 잡기가 끝났는지 여부
+        self.GRASP_THRESHOLD = 0.25    # 잡기 시도 거리 (5cm)
+
+        self.gripper_drive_idx = self._robot.find_joints(".*drive_joint")[0][0]
+        self.joint4_index = self._robot.find_joints(["joint4"])[0]
+        self.joint6_index = self._robot.find_joints(["joint6"])[0]
+
+        self.target_grasp_width = torch.zeros(self.num_envs, device=self.device)
+        self.target_grasp_angle = torch.zeros(self.num_envs, device=self.device)
 
     def subscribe_yolo(self):
         msg = self.yolo_msg
@@ -1056,17 +1099,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         return q_conj
     
     def compute_camera_world_pose(self, cam_offset_pos, q_cam_in_hand, hand_pos, hand_rot):
-        # if yolo_mode: # camera_type == CameraType.Azure:
-        #     cam_offset_pos = self.t_cam_to_gripper_local.repeat(self.num_envs, 1)
-        #     q_cam_in_hand = self.R_cam_to_gripper_local.repeat(self.num_envs, 1)
-
-        # else: # camera_type == CameraType.Sim:
-        #     cam_offset_pos = torch.tensor([0.07, 0.03, -0.13], device=hand_pos.device).repeat(self.num_envs, 1)
-        #     q_cam_in_hand = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=hand_pos.device).repeat(self.num_envs, 1)
-
-        # cam_offset_pos = torch.tensor([0.07, 0.03, -0.13], device=hand_pos.device).repeat(self.num_envs, 1)
-        # q_cam_in_hand = torch.tensor([0.7071, 0.0, 0.0, 0.7071], device=hand_pos.device).repeat(self.num_envs, 1)
-
         camera_rot_w, camera_pos_w_abs = tf_combine(
             hand_rot,           # R_wg, t_wg
             hand_pos,
@@ -1120,24 +1152,33 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         self.scene.rigid_objects["base_link"] = self._box
 
     # pre-physics step calls
-
     def _pre_physics_step(self, actions: torch.Tensor):
         self.actions = actions.clone().clamp(-1.0, 1.0)
                 
+        # current_action_scale = self.action_scale_tensor.unsqueeze(-1) 
+        # potential_targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * self.actions * current_action_scale
+        # potential_targets_clamped = torch.clamp(potential_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+
         current_action_scale = self.action_scale_tensor.unsqueeze(-1) 
-        potential_targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * self.actions * current_action_scale
-        potential_targets_clamped = torch.clamp(potential_targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+
+        # [수정 1] 전체 12개 중 '팔 관절 6개'만 잘라냅니다.
+        arm_targets = self.robot_dof_targets[:, :6]
+        arm_speed_scales = self.robot_dof_speed_scales[:6]
+        
+        # [수정 2] 6개짜리끼리 계산 (이제 에러 안 남)
+        new_arm_targets = arm_targets + arm_speed_scales * self.dt * self.actions * current_action_scale
+        
+        # [수정 3] 리미트도 6개만 가져와서 적용
+        lower_limits = self.robot_dof_lower_limits[:6]
+        upper_limits = self.robot_dof_upper_limits[:6]
+        potential_targets_clamped = torch.clamp(new_arm_targets, lower_limits, upper_limits)
+
+        # [수정 4] 계산된 6개를 원본 배열의 '앞쪽 6칸'에만 업데이트
+        self.robot_dof_targets[:, :6] = potential_targets_clamped
 
         if yolo_mode:
             now_ros = self.yolo_node.get_clock().now()
             current_time_sec = now_ros.nanoseconds / 1e9 
-
-            # 2. 실제 관절값 확보
-            # code, angles = self.arm.get_servo_angle(is_radian=True)
-            # if code == 0:
-            #     current_joints = angles[:6] # 6축
-            #     # (시간, 관절각도) 튜플로 저장
-            #     self.pose_history.append((current_time_sec, current_joints))
 
             current_joints = None
             if hasattr(self, 'real_robot_pose_lock'):
@@ -1149,20 +1190,26 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 self.pose_history.append((current_time_sec, current_joints))
 
         if training_mode:
-            self.robot_dof_targets[:] = potential_targets_clamped
+            self.robot_dof_targets[:,:6] = potential_targets_clamped
         else:            
-            hold_targets = self.current_joint_pos_buffer
+            hold_targets = self.current_joint_pos_buffer[:, :6]
             
             if not yolo_mode:
                 visible_mask_expanded = torch.ones_like(self.is_object_visible_mask.unsqueeze(-1), dtype=torch.bool)
             else:
                 visible_mask_expanded = self.is_object_visible_mask.unsqueeze(-1) 
             
-            self.robot_dof_targets[:] = torch.where(
+            self.robot_dof_targets[:, :6] = torch.where(
                 visible_mask_expanded, 
                 potential_targets_clamped,  # 시야 O (혹은 YOLO off): 행동 적용
                 hold_targets                # 시야 X: 현재 위치 고수 (정지)
             )
+        
+        if hasattr(self, 'gripper_drive_idx'):
+            g_idx = self.gripper_drive_idx
+            
+            # [핵심] 그리퍼 타겟을 '상한값(Upper Limit)'으로 강제 고정 -> 최대 벌림
+            self.robot_dof_targets[:, g_idx] = 0.00
 
         self.cfg.current_time = self.cfg.current_time + self.dt
         current_time = torch.tensor(self.cfg.current_time, device=self.device, dtype=torch.float32)
@@ -1181,8 +1228,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
         if len(linear_env_ids) > 0:
             # 2. 현재 시뮬레이션 상의 '실제' 위치 가져오기 (매우 중요!)
-            # 기존에는 self.new_box_pos_rand 변수로 위치를 따로 관리했지만,
-            # 이제는 물리 엔진이 이동시키므로 실제 위치를 조회해야 오차가 없습니다.
             current_pos_world = self._box.data.root_pos_w[linear_env_ids] # (N, 3)
             
             # 3. 목표 도달 확인 (거리 1cm 미만)
@@ -1316,8 +1361,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             self.speed_change_timer[linear_env_ids] -= self.dt
             
             # 2. 타이머가 0 이하로 떨어진 환경들 찾기 (속도를 바꿀 때가 된 환경들)
-            # 주의: linear_env_ids 중에서 골라내야 하므로 인덱싱에 주의해야 합니다.
-            # 전체 환경 기준 마스크를 씁니다.
             time_up_mask = (self.speed_change_timer <= 0.0) & linear_move_mask
             env_ids_to_change_speed = torch.where(time_up_mask)[0]
             
@@ -1351,47 +1394,281 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             velocity_command[:, 0:3] = lin_vel
             self._box.write_root_velocity_to_sim(velocity_command, env_ids=linear_env_ids)
 
+    def _execute_grasp(self, target_pos_m, grasp_angle_rad, grasp_width_m):
+        """
+        [Joint Interpolation Approach]
+        IK 불안정으로 인한 '구불거림'을 제거하기 위해,
+        끝점의 관절 각도를 미리 계산한 뒤, 현재 각도와 끝 각도 사이를
+        부드럽게 연결(Interpolation)하여 이동합니다.
+        """
+        print(f"\n[Grasp Triggered] Calculating Smooth Path...")
+
+        if not UFactory_set_mode:
+            self.is_grasping = False
+            return
+
+        # ------------------------------------------------------------------
+        # 1. 현재 로봇 상태(Cartesian + Joint) 읽기
+        # ------------------------------------------------------------------
+        # 관절 각도 (시작점)
+        code, curr_joints = self.arm.get_servo_angle(is_radian=True)
+        if code != 0: self.is_grasping = False; return
+        start_joints = np.array(curr_joints[:6]) # Numpy로 변환
+
+        # TCP 위치
+        code_pos, curr_pose = self.arm.get_position(is_radian=False)
+        if code_pos != 0: self.is_grasping = False; return
+        
+        curr_x, curr_y, curr_z = curr_pose[0], curr_pose[1], curr_pose[2]
+        curr_roll, curr_pitch, curr_yaw = curr_pose[3], curr_pose[4], curr_pose[5]
+
+        # ------------------------------------------------------------------
+        # 2. 목표지점(Cartesian) 계산
+        # ------------------------------------------------------------------
+        target_x = target_pos_m[0] * 1000.0
+        target_y = target_pos_m[1] * 1000.0
+        target_z = max(20.0, target_pos_m[2] * 1000.0)
+
+        vec_x, vec_y, vec_z = target_x - curr_x, target_y - curr_y, target_z - curr_z
+        distance = math.sqrt(vec_x**2 + vec_y**2 + vec_z**2) + 1e-6
+        unit_x, unit_y, unit_z = vec_x/distance, vec_y/distance, vec_z/distance
+
+        # 깊이 / 후퇴 거리 설정
+        EXTRA_DEPTH_MM = 100.0  # 5cm 진입
+        RETRACT_DIST = 100.0    # 5cm 후퇴
+
+        # [진입 목표점]
+        final_x = target_x + (unit_x * EXTRA_DEPTH_MM)
+        final_y = target_y + (unit_y * EXTRA_DEPTH_MM)
+        final_z = max(15.0, target_z + (unit_z * EXTRA_DEPTH_MM))
+
+        # [후퇴 목표점] (진입점에서 뒤로 빠짐)
+        retract_x = final_x - (unit_x * RETRACT_DIST)
+        retract_y = final_y - (unit_y * RETRACT_DIST)
+        retract_z = final_z - (unit_z * RETRACT_DIST)
+
+        open_target = 850
+        close_target = max(0, grasp_width_m * 10000.0)
+
+        # ------------------------------------------------------------------
+        # [Helper] 관절 보간 경로 생성 (핵심 수정)
+        # ------------------------------------------------------------------
+        def generate_joint_trajectory(start_j, target_pose_list, speed_mm_s):
+            """
+            Cartesian 목표점(target_pose_list)에 대한 IK를 '딱 한번' 풀고,
+            현재 관절각(start_j)에서 목표 관절각까지 선형 보간하여 리스트 생성.
+            -> 경로가 절대 구불거리지 않음.
+            """
+            # 1. 목표점의 IK 솔루션 구하기
+            code, target_j = self.arm.get_inverse_kinematics(
+                pose=target_pose_list, 
+                input_is_radian=False, return_is_radian=True
+            )
+            
+            if code != 0:
+                print("[Error] IK Solution Not Found!")
+                return None
+            
+            target_j = np.array(target_j[:6])
+            
+            # [Safety] 관절이 너무 많이 회전(Flip)하는지 체크 (30도 이상 튀면 위험)
+            diff_deg = np.degrees(np.abs(target_j - start_j))
+            if np.max(diff_deg) > 45.0:
+                print(f"[Warning] IK Solution FLIP detected! Max diff: {np.max(diff_deg):.1f} deg. Aborting.")
+                return None
+
+            # 2. 이동 거리 및 스텝 수 계산
+            # Cartesian 거리로 시간 계산 (정확하진 않지만 근사치)
+            # 현재 위치와 목표 위치 사이 거리
+            dist = math.sqrt((target_pose_list[0]-curr_pose[0])**2 + 
+                             (target_pose_list[1]-curr_pose[1])**2 + 
+                             (target_pose_list[2]-curr_pose[2])**2)
+            
+            duration = dist / speed_mm_s
+            steps = int(duration * 50) # 50Hz 제어
+            if steps < 1: steps = 1
+
+            # 3. 관절각 선형 보간 (Linear Interpolation)
+            traj = []
+            for i in range(1, steps + 1):
+                t = i / steps
+                # 시작 각도와 목표 각도 사이를 t 비율만큼 섞음
+                interp_j = start_j + (target_j - start_j) * t
+                traj.append(interp_j.tolist())
+                
+            return traj, target_j # 마지막 관절각도 반환 (다음 경로 시작점용)
+
+        def execute_joints(joint_list):
+            """50Hz 속도로 전송"""
+            period = 1.0 / 50.0
+            for j_pos in joint_list:
+                start_t = time.perf_counter()
+                self.arm.set_servo_angle(angle=j_pos, is_radian=True, wait=False)
+                elapsed = time.perf_counter() - start_t
+                if period > elapsed:
+                    time.sleep(period - elapsed)
+
+        def wait_mode6(duration_sec):
+            steps = int(duration_sec / 0.02)
+            c, j = self.arm.get_servo_angle(is_radian=True)
+            if c != 0: return
+            cur_j = j[:6]
+            for _ in range(steps):
+                self.arm.set_servo_angle(angle=cur_j, is_radian=True, wait=False)
+                time.sleep(0.02)
+
+        # ------------------------------------------------------------------
+        # [Step 0] 경로 생성 (Joint Interpolation)
+        # ------------------------------------------------------------------
+        # 진입 목표 (Orientation은 현재 자세 유지)
+        final_pose_list = [final_x, final_y, final_z, curr_roll, curr_pitch, curr_yaw]
+        
+        # 1. 진입 경로 생성 (속도 40mm/s)
+        res_approach = generate_joint_trajectory(start_joints, final_pose_list, speed_mm_s=40.0)
+        if res_approach is None:
+            self.is_grasping = False; return
+        approach_traj, joints_at_grasp = res_approach
+
+        # 2. 후퇴 경로 생성 (속도 200mm/s)
+        # 후퇴는 '잡은 위치(joints_at_grasp)'에서 시작해야 함
+        retract_pose_list = [retract_x, retract_y, retract_z, curr_roll, curr_pitch, curr_yaw]
+        res_retract = generate_joint_trajectory(joints_at_grasp, retract_pose_list, speed_mm_s=200.0)
+        if res_retract is None:
+            self.is_grasping = False; return
+        retract_traj, _ = res_retract
+
+        # ------------------------------------------------------------------
+        # 실행 시퀀스
+        # ------------------------------------------------------------------
+        self.arm.set_gripper_position(int(open_target), wait=False)
+
+        # 1. 진입
+        print(f"[Step 1] Smooth Approach (Speed: 40mm/s)...")
+        execute_joints(approach_traj)
+
+        print("[Step 2] Stabilizing...")
+        wait_mode6(1.0)
+
+        # 2. 잡기
+        print("[Step 3] Grasping...")
+        self.arm.set_gripper_position(int(close_target), wait=True)
+        wait_mode6(0.5)
+
+        # 3. 후퇴
+        print(f"[Step 4] Fast Retract (Speed: 200mm/s)...")
+        execute_joints(retract_traj)
+
+        # 4. 확인
+        print("[Step 5] Checking Visibility...")
+        wait_mode6(1.0)
+
+        # --- 결과 판단 ---
+        object_still_visible = False
+        current_time = time.time()
+        with self.yolo_lock:
+            if self.shared_yolo_robot is not None:
+                if (current_time - getattr(self, 'shared_yolo_robot_time', 0.0)) < 1.0: 
+                    object_still_visible = True
+
+        if object_still_visible:
+            print(">>> [Retry] Object still detected!")
+        else:
+            print(">>> [Success] Drop & Reset.")
+            wait_mode6(1.0)
+            self.arm.set_gripper_position(int(open_target), wait=True)
+
+        # --- 동기화 ---
+        print(">>> Syncing Simulation...")
+        code, current_joints = self.arm.get_servo_angle(is_radian=True)
+        if code == 0:
+            real_joints_tensor = torch.tensor(current_joints[:6], device=self.device)
+            self.robot_dof_targets[:] = real_joints_tensor
+            self.current_joint_pos_buffer[:] = real_joints_tensor
+            if training_mode: self.episode_init_joint_pos[:] = real_joints_tensor
+
+        self.grasp_done = False   
+        self.is_grasping = False
+        print(">>> Resume Tracking.")
+
     def _apply_action(self):
         global robot_action
         global robot_init_pose
         
+        # [Grasping State Check]
+        # 이미 잡기를 수행 중이거나 완료했다면 더 이상 Tracking 명령을 보내지 않음
+        if self.is_grasping or self.grasp_done:
+            return
+
         target_pos = self.robot_dof_targets.clone()
         
-        # xArm 6축 제어를 위해 4, 6번 관절 등 불필요한 값 0 처리 (기존 로직 유지)
-        joint4_index = self._robot.find_joints(["joint4"])[0]
-        joint6_index = self._robot.find_joints(["joint6"])[0]
-        target_pos[:, joint4_index] = 0.0
-        target_pos[:, joint6_index] = 0.0
+        # xArm 6축 제어를 위한 마스킹 (4, 6번 관절 0 처리)
+        target_pos[:, self.joint4_index] = 0.0
+        target_pos[:, self.joint6_index] = 0.0
         target_pos[:, 7:] = 0.0
         
+        # ------------------------------------------------------------------
+        # TEST Mode & Robot NOT Fixed
+        # ------------------------------------------------------------------
         if training_mode == False and robot_fix == False:
-            # ------------------------------------------------------------------
-            # [Case 1] 로봇 제어 시작됨 (Tracking 중)
-            # ------------------------------------------------------------------
+            
+            # [Case 1] 로봇 제어 시작됨 (Tracking Active)
             if robot_action and robot_init_pose:
+                
+                # ==========================================================
+                # [Grasping Trigger] 25cm 진입 시 잡기 시작
+                # ==========================================================
+                # 1. 로봇(TCP)과 물체(Target) 사이의 거리 계산
+                # env_id=0 기준
+                if hasattr(self, 'robot_grasp_pos') and hasattr(self, 'last_known_world_pos'):
+                    current_dist = torch.norm(self.robot_grasp_pos[0] - self.last_known_world_pos[0], p=2)
+                    
+                    # 2. 거리가 임계값(0.25m) 이내인지 확인
+                    if current_dist < self.GRASP_THRESHOLD and real_robot_move and grasping_mode: 
+                        self.is_grasping = True # 플래그 설정 -> Tracking 중단
+                        
+                        target_obj_pos = self.last_known_world_pos[0].cpu().numpy()
+                        
+                        # [너비 설정] 머스타드 병 기준 약 5.5cm (0.055m)
+                        detected_width = 0.055 
+                        
+                        # 잡기 시퀀스 함수 호출 (Blocking)
+                        self._execute_grasp(target_obj_pos, grasp_angle_rad=0.0, grasp_width_m=detected_width)
+                        
+                        self.grasp_done = True
+                        self.is_grasping = False
+                        return # 함수 종료 (더 이상 Tracking 명령 전송 안 함)
+                # ==========================================================
+
+                # [Existing] Tracking Logic (Grasping 조건이 아닐 때)
                 self._robot.set_joint_position_target(target_pos)
 
                 if UFactory_set_mode:
                     xarm_actions = self._robot.data.joint_pos[:, :6]
 
                     if robot_type == RobotType.UF:
-                        xarm_actions[:, joint4_index] = 0.0
-                        xarm_actions[:, joint6_index] = 0.0
+                        xarm_actions[:, self.joint4_index] = 0.0
+                        xarm_actions[:, self.joint6_index] = 0.0
 
                     angle_cmd = xarm_actions.detach().cpu().numpy().flatten().tolist()
 
-                    ang_speed = 150
-                    angmvacc = 60.0
+                    # [기존 설정 유지] 로봇이 튀지 않도록 원래 속도값 사용
+                    ang_speed = 150    
+                    angmvacc = 60.0    
+                    
                     rad_speed = math.radians(ang_speed)
                     rad_mvacc = math.radians(angmvacc)
 
                     if real_robot_move:
-                        # 실제 로봇에 명령 전송
-                        self.arm.set_servo_angle(angle=angle_cmd, speed=rad_speed, wait=False, is_radian=True, mvacc = rad_mvacc)
+                        # 실제 로봇에 명령 전송 (wait=False로 비동기 연속 전송)
+                        self.arm.set_servo_angle(
+                            angle=angle_cmd, 
+                            speed=rad_speed, 
+                            wait=False, 
+                            is_radian=True, 
+                            mvacc=rad_mvacc
+                        )
 
-            # ------------------------------------------------------------------
             # [Case 2] 로봇 제어 대기 중 (Start 조건 확인)
-            # ------------------------------------------------------------------
             elif robot_action == False and robot_init_pose == False:
                 # 시뮬레이션 로봇은 초기 자세로 이동 시도 (Visual)
                 init_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
@@ -1404,26 +1681,32 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 joint_err = torch.abs(self._robot.data.joint_pos - init_pos)
                 max_err = torch.max(joint_err).item()
                 
+                # YOLO 모드일 때 물체가 보여야 시작
                 if yolo_mode:
                     is_visible = self.is_object_visible_mask[0].item()
                     
                     if is_visible: 
                         self.init_cnt += 1
-                        print(f"init_cnt : {self.init_cnt}")
+                        # print(f"init_cnt : {self.init_cnt}") # 로그 너무 많으면 주석 처리
 
                         if self.init_cnt > 5: 
+                            # 시작 시 튀는 현상 방지를 위해 현재 위치로 타겟 동기화
                             self.robot_dof_targets[:] = self.current_joint_pos_buffer.clone()
                             
                             robot_action = True
                             robot_init_pose = True
 
+                # YOLO 모드가 아닐 때 (Sim Only) 위치만 맞으면 시작
                 elif yolo_mode == False and max_err < 0.3:
                     self.init_cnt += 1
-                    print(f"init_cnt : {self.init_cnt}")
+                    # print(f"init_cnt : {self.init_cnt}")
                     if self.init_cnt > 5:
                         robot_init_pose = True
                         robot_action = True
                                
+        # ------------------------------------------------------------------
+        # Training Mode
+        # ------------------------------------------------------------------
         elif training_mode == True and robot_fix == False:
             if robot_init_pose == False:
                 init_pos = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
@@ -1442,7 +1725,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 
             elif robot_init_pose:
                 self._robot.set_joint_position_target(target_pos)
-                   
+            
     # post-physics step calls
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         if hasattr(self, 'is_pview_fail'):
@@ -2065,7 +2348,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                     self._perform_linear_reset(env_ids_level_4_plus)
 
             else: # training_mode == False (테스트 모드)
-                self.action_scale_tensor[env_ids] = 2.0 # (4.0이 적용됨)
+                self.action_scale_tensor[env_ids] = 3.0 # (4.0이 적용됨)
 
                 if object_move == ObjectMoveType.STATIC:
                     self.object_move_state[env_ids] = self.MOVE_STATE_STATIC
@@ -2218,7 +2501,7 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             # [Step 2] Fixed Camera World Pos 계산
             # ---------------------------------------------------------
             pos_w_from_fixed = None
-            if raw_fixed_cam_world is not None:
+            if raw_fixed_cam_world is not None and fixed_camera_enable:
                 # 로봇 카메라가 죽었을 때를 대비해 시간 갱신 (고정 카메라라도 있으면 살아있는 것임)
                 if pos_w_from_robot is None:
                     self.last_detection_system_time = current_system_time
@@ -2232,10 +2515,11 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             # 로봇 카메라 신뢰 조건 (> 15cm)
             is_robot_reliable = (pos_w_from_robot is not None) or (dist_from_hand < 0.15)
 
-            print("*"* 50)
-            print("pos_w_from_robot :", pos_w_from_robot)
-            print("is_robot_reliable :", is_robot_reliable)
-            print("pos_w_from_fixed :", pos_w_from_fixed)
+            # print("*"* 50)
+            # print("pos_w_from_robot :", pos_w_from_robot)
+            # print("is_robot_reliable :", is_robot_reliable)
+            # print("pos_w_from_fixed :", pos_w_from_fixed)
+            # print("yolo_cv :", yolo_cv)
 
             # [상황 A] 둘 다 데이터가 양호함 -> 오차(Offset) 업데이트
             if is_robot_reliable and (pos_w_from_fixed is not None):
@@ -2244,7 +2528,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 self.is_object_visible_mask[:] = True
                 
                 # [핵심] "고정 카메라가 로봇 카메라에 비해 얼마나 틀어져 있는지" 계산 후 저장
-                # Offset = Robot(정답) - Fixed(참조)
                 current_offset = pos_w_from_robot - pos_w_from_fixed
                 
                 # 오차를 부드럽게 업데이트 (급격한 변화 방지, Alpha 0.1)
@@ -2350,8 +2633,9 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
         obs = torch.cat(
             (
-                dof_pos_scaled,                                    
-                self._robot.data.joint_vel * self.cfg.dof_velocity_scale,   
+                dof_pos_scaled[:,:6],                                    
+                # self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
+                (self._robot.data.joint_vel * self.cfg.dof_velocity_scale)[:, :6],
                 box_pos_c_cur,           
                 box_pos_w_cur,
                 self.prev_box_pos_w,     
