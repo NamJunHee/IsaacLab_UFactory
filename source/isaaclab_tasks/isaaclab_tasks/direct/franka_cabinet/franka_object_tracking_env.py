@@ -798,17 +798,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
                 
         rclpy.init()
         
-        if image_publish:      
-            qos_profile = QoSProfile(depth=10)
-            qos_profile.reliability = QoSReliabilityPolicy.BEST_EFFORT
-
-            self.node = rclpy.create_node('camera_publisher')
-            self.camera_info_publisher = self.node.create_publisher(CameraInfo, '/camera_info_rect',10)
-            self.rgb_publisher = self.node.create_publisher(Image, '/image_rect',10)
-            self.depth_publisher = self.node.create_publisher(Image, '/depth',10)
-            
-            self.bridge = CvBridge()
-        
         self.init_cnt = 0
 
         if UFactory_set_mode:
@@ -865,35 +854,26 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         self.prev_box_pos_c = torch.zeros((self.num_envs, 3), device=self.device)
         
         if yolo_mode:
-            self.yolo_msg = None
             self.yolo_pos_raw = None
-            self.last_valid_yolo_raw = None 
-            self.last_yolo_time = 0.0
 
-            self.yolo_fixed_msg = None
-            self.last_valid_yolo_fixed = None
-            self.last_yolo_fixed_time = 0.0
-
-            self.yolo_node = rclpy.create_node('yolo_receiver')
-
-            # [핵심] 스레드 간 데이터 공유를 위한 변수와 락(Lock)
             self.yolo_lock = threading.Lock()
-            self.shared_yolo_robot = None # 로봇 카메라 좌표 [x, y, z]
-            self.shared_yolo_fixed = None # 고정 카메라 좌표 [x, y, z]
-            self.shared_yolo_robot_time = 0.0
+            self.yolo_from_RobotCam = None # 로봇 카메라 좌표 [x, y, z]
+            self.yolo_from_FixedCam= None # 고정 카메라 좌표 [x, y, z]
+            self.yolo_from_RobotCam_time = 0.0
             
             # 콜백 함수 정의 (여기서 락을 걸고 데이터 저장)
             def robot_cam_callback(msg):
                 with self.yolo_lock:
-                    self.shared_yolo_robot = torch.tensor([msg.x, msg.y, msg.z], device=self.device)
-                    # 메시지 시간 기록 (Latency 체크용)
-                    self.shared_yolo_robot_time = time.time()
+                    self.yolo_from_RobotCam = torch.tensor([msg.x, msg.y, msg.z], device=self.device)
+                    self.yolo_from_RobotCam_time = time.time()
 
             def fixed_cam_callback(msg):
                 with self.yolo_lock:
-                    self.shared_yolo_fixed = torch.tensor([msg.x, msg.y, msg.z], device=self.device)
+                    self.yolo_from_FixedCam = torch.tensor([msg.x, msg.y, msg.z], device=self.device)
 
             # 구독 설정
+            self.yolo_node = rclpy.create_node('yolo_receiver')
+
             self.yolo_node.create_subscription(Point, '/yolo/point', robot_cam_callback, 10)
             self.yolo_node.create_subscription(Point, '/yolo/point_world', fixed_cam_callback, 10)
 
@@ -967,95 +947,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
         self.target_grasp_width = torch.zeros(self.num_envs, device=self.device)
         self.target_grasp_angle = torch.zeros(self.num_envs, device=self.device)
-
-    def subscribe_yolo(self):
-        msg = self.yolo_msg
-        self.yolo_msg = None
-
-        if msg is None:
-            return None
-
-        return torch.tensor([msg.x, msg.y, msg.z], device=self.device)
-
-    def subscribe_yolo_fixed(self):
-        msg = self.yolo_fixed_msg
-        self.yolo_fixed_msg = None # 읽으면 초기화 (중복 방지)
-        if msg is None: return None
-        return torch.tensor([msg.x, msg.y, msg.z], device=self.device)
-
-    def yolo_callback(self,msg):
-        self.yolo_msg = msg
-    
-    def yolo_fixed_callback(self, msg):
-        self.yolo_fixed_msg = msg
-
-    def publish_camera_data(self):
-        env_id = 0
-        
-        current_stamp = self.node.get_clock().now().to_msg() 
-        current_stamp.sec = current_stamp.sec % 50000
-        current_stamp.nanosec = 0
-                
-        if image_publish:            
-            rgb_data = self._camera.data.output["rgb"]
-            depth_data = self._camera.data.output["depth"]
-            
-            rgb_image = (rgb_data.cpu().numpy()[env_id]).astype(np.uint8)
-            depth_image = (depth_data.cpu().numpy()[env_id]).astype(np.float32)
-
-            # Publish Camera Info
-            camera_info_msg = CameraInfo()
-            camera_info_msg.header.stamp = current_stamp
-            
-            camera_info_msg.header.frame_id = 'tf_camera'
-        
-            camera_info_msg.height = 480 
-            camera_info_msg.width = 640 
-            
-            camera_info_msg.distortion_model = 'plumb_bob'
-        
-            intrinsic_matrices = self._camera.data.intrinsic_matrices.cpu().numpy().flatten().tolist()
-            camera_info_msg.k = intrinsic_matrices[:9]
-            camera_info_msg.d = [0.0, 0.0, 0.0, 0.0, 0.0]
-            camera_info_msg.r = [1.0, 0.0, 0.0,
-                                 0.0, 1.0, 0.0,
-                                 0.0, 0.0, 1.0]
-            camera_info_msg.p = intrinsic_matrices[:3] + [0.0] + intrinsic_matrices[3:6] + [0.0] + [0.0, 0.0, 1.0, 0.0]
-
-            camera_info_msg.binning_x = 0
-            camera_info_msg.binning_y = 0
-
-            camera_info_msg.roi.x_offset = 0
-            camera_info_msg.roi.y_offset = 0
-            camera_info_msg.roi.height = 0
-            camera_info_msg.roi.width = 0
-            camera_info_msg.roi.do_rectify = False
-        
-            self.camera_info_publisher.publish(camera_info_msg)
-        
-            # Publish RGB Image
-            rgb_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding='rgb8')
-            rgb_msg.header.stamp = current_stamp
-            rgb_msg.header.frame_id = 'tf_camera'
-            self.rgb_publisher.publish(rgb_msg)
-
-            # Publish Depth Image
-            depth_msg = self.bridge.cv2_to_imgmsg(depth_image, encoding='32FC1')
-            depth_msg.header.stamp = current_stamp
-            depth_msg.header.frame_id = 'tf_camera'
-            self.depth_publisher.publish(depth_msg)
-            depth_msg.step = depth_image.shape[1] * 4
-    
-    def subscribe_object_pos(self):
-        msg = self.latest_detection_msg
-        
-        if msg is None:
-            return None
-
-        return torch.tensor([msg.x, msg.y, msg.z], device=self.device)
-        
-    def foundationpose_callback(self,msg):
-        self.latest_detection_msg = msg
     
     def quat_mul(self, q, r):
         x1, y1, z1, w1 = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
@@ -1068,31 +959,6 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
 
         quat = torch.stack((x, y, z, w), dim=-1)
         return kornia.geometry.conversions.normalize_quaternion(quat)
-    
-    def get_real_hand_pose(self):
-        code, pose_mm_deg = self.arm.get_position(is_radian=False)
-
-        if code != 0:
-            print(f"Error: 실제 로봇 TCP 자세를 읽는 데 실패했습니다. 오류 코드: {code}")
-            return None, None
-
-        pos_m = [p / 1000.0 for p in pose_mm_deg[:3]]
-
-        roll_deg, pitch_deg, yaw_deg = pose_mm_deg[3:]
-
-        r = scipy.spatial.transform.Rotation.from_euler('xyz', [roll_deg, pitch_deg, yaw_deg], degrees=True)
-        # r = scipy.spatial.transform.Rotation.from_euler('xzy', [yaw_deg, pitch_deg, roll_deg], degrees=True)
-        quat_xyzw = r.as_quat()
-        quat_wxyz = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]
-
-        hand_pos_real = torch.tensor([pos_m], device=self.device, dtype=torch.float32)
-        hand_rot_real = torch.tensor([quat_wxyz], device=self.device, dtype=torch.float32)
-
-        # print("*" * 50)
-        # print("hand_pos_real:",hand_pos_real)
-        # print("hand_rot_real:",hand_rot_real)
-        
-        return hand_pos_real, hand_rot_real
 
     def quat_conjugate(self, q):
         q_conj = torch.cat([-q[:, :3], q[:, 3:4]], dim=-1)
@@ -1214,12 +1080,12 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         self.cfg.current_time = self.cfg.current_time + self.dt
         current_time = torch.tensor(self.cfg.current_time, device=self.device, dtype=torch.float32)
         
-        if image_publish:   
-            self.last_publish_time += self.dt
-            if self.last_publish_time >= (1.0 / 15.0):  # 30fps 기준
-                self.publish_camera_data()
-                rclpy.spin_once(self.node, timeout_sec=0.000)
-                self.last_publish_time = 0.0
+        # if image_publish:   
+        #     self.last_publish_time += self.dt
+        #     if self.last_publish_time >= (1.0 / 15.0):  # 30fps 기준
+        #         self.publish_camera_data()
+        #         rclpy.spin_once(self.node, timeout_sec=0.000)
+        #         self.last_publish_time = 0.0
 
         # 물체 위치 랜덤 선형 이동 (Per-Environment)
         # 1. LINEAR 상태인 환경의 인덱스를 찾습니다.
@@ -1566,8 +1432,8 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
         object_still_visible = False
         current_time = time.time()
         with self.yolo_lock:
-            if self.shared_yolo_robot is not None:
-                if (current_time - getattr(self, 'shared_yolo_robot_time', 0.0)) < 1.0: 
+            if self.yolo_from_RobotCam is not None:
+                if (current_time - getattr(self, 'yolo_from_RobotCam_time', 0.0)) < 1.0: 
                     object_still_visible = True
 
         if object_still_visible:
@@ -2436,12 +2302,12 @@ class FrankaObjectTrackingEnv(DirectRLEnv):
             last_msg_time = 0.0 # 메시지 수신 시간
 
             with self.yolo_lock:
-                if self.shared_yolo_robot is not None:
-                    new_yolo_raw = self.shared_yolo_robot.clone()
-                    last_msg_time = getattr(self, 'shared_yolo_robot_time', 0.0)
+                if self.yolo_from_RobotCam is not None:
+                    new_yolo_raw = self.yolo_from_RobotCam.clone()
+                    last_msg_time = getattr(self, 'yolo_from_RobotCam_time', 0.0)
 
-                if self.shared_yolo_fixed is not None:
-                    raw_fixed_cam_world = self.shared_yolo_fixed.clone()
+                if self.yolo_from_FixedCam is not None:
+                    raw_fixed_cam_world = self.yolo_from_FixedCam.clone()
             
             current_system_time = time.time()
             if not hasattr(self, 'last_detection_system_time'):
